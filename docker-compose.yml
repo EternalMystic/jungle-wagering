@@ -1,0 +1,41 @@
+# Infra local: PostgreSQL 16 + emulador SQS (MiniStack, sem token).
+# `docker compose up -d --wait` só retorna quando os dois healthchecks estão verdes.
+#
+# Porta do Postgres no host: 55432 por padrão (a 5432 costuma estar ocupada por outro
+# Postgres da máquina). Sobrescreva com POSTGRES_HOST_PORT; a aplicação lê DATABASE_URL
+# (padrão em src/infrastructure/config/app-config.ts aponta para 55432).
+name: wagering
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: wagering
+    ports:
+      - "${POSTGRES_HOST_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wagering"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  sqs:
+    image: ministackorg/ministack:latest
+    ports:
+      - "${SQS_HOST_PORT:-4566}:4566"
+    healthcheck:
+      # A imagem pode não ter curl; tenta python, curl e wget, nesta ordem.
+      # Qualquer resposta HTTP/TCP na 4566 = emulador aceitando conexões.
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c 'import socket;socket.create_connection((socket.gethostname(),4566),2)'
+          || python -c 'import socket;socket.create_connection((socket.gethostname(),4566),2)'
+          || curl -s -o /dev/null http://127.0.0.1:4566/
+          || wget -q -O /dev/null http://127.0.0.1:4566/_ministack/health
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 5s

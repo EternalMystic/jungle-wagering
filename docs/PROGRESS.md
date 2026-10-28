@@ -11,7 +11,7 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Em aberto
 
-- —
+- 2026-10-28: tentativa de executar `scripts/run-unattended.sh` bloqueada antes de iniciar o script: Git Bash falhou com `couldn't create signal pipe, Win32 error 5` (acesso negado).
 
 ## Próxima ação
 
