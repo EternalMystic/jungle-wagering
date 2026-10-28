@@ -1,0 +1,96 @@
+# CI — o árbitro neutro: nenhuma IA consegue "convencer" este job.
+# Roda a cada push e PR com PostgreSQL e emulador SQS REAIS (service containers).
+# Com GitHub Pro, proteja o ramo main exigindo este check verde antes do merge
+# (Settings → Branches → Branch protection → Require status checks: "ci").
+#
+# AJUSTE no spike (Dia 1): o emulador de SQS.
+#   - LocalStack: desde 23/03/2026 a imagem atual exige conta e token. Crie conta
+#     gratuita, gere um CI auth token e salve como secret LOCALSTACK_AUTH_TOKEN.
+#   - MiniStack (MIT, sem token): troque a imagem por ministackorg/ministack e o
+#     health para /_ministack/ready — mas CONFIRME no spike que FIFO + RedrivePolicy
+#     funcionam; se a redrive não funcionar, o envio explícito à DLQ (D9) continua valendo.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wagering
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      sqs:
+        image: localstack/localstack
+        env:
+          SERVICES: sqs
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+        ports: ["4566:4566"]
+        options: >-
+          --health-cmd "curl -fs http://localhost:4566/_localstack/health"
+          --health-interval 3s --health-timeout 5s --health-retries 40
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/wagering
+      AWS_ENDPOINT_URL: http://localhost:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # histórico completo para comparar com main
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Arquivos congelados não mudaram (a menos que o PR diga "[acceptance]")
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.title, '[acceptance]')
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '^(test/acceptance/|reference/|docs/CHALLENGE\.md)' || true)
+          if [ -n "$changed" ]; then
+            echo "::error::Arquivos congelados alterados:"; echo "$changed"; exit 1
+          fi
+
+      - name: Código proibido (mesmas regras do hook do Claude Code)
+        run: bun run scripts/scan-forbidden.ts
+
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun test test/unit
+
+      - name: Filas SQS
+        run: bun run sqs:setup
+
+      - name: Migrations — round-trip up/down/up
+        run: bun run migration:up && bun run migration:down && bun run migration:up
+
+      - name: Gabarito do schema (ataques, corridas, invariantes)
+        run: bun run verify:schema
+
+      - run: bun run test:acceptance
+      - run: bun run test:integration
+
+      - name: Concorrência — 3 execuções seguidas (intermitência é bug)
+        run: for i in 1 2 3; do bun run test:concurrency || exit 1; done

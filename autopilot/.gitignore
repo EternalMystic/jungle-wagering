@@ -1,0 +1,8 @@
+logs/
+autopilot.log
+state.json
+REVISAR.md
+BLOQUEADO.md
+run.out
+watchdog.sh
+watchdog.pid
