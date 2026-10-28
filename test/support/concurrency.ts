@@ -83,6 +83,7 @@ export async function countLockWaiters(pool: Pool, excludePid: number): Promise<
     `SELECT count(*)::int AS n
        FROM pg_stat_activity
       WHERE datname = current_database()
+        AND backend_type = 'client backend'
         AND wait_event_type = 'Lock'
         AND pid <> $1
         AND pid <> pg_backend_pid()`,

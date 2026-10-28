@@ -8,7 +8,9 @@
  * requisições da aplicação bloqueadas AO MESMO TEMPO — prova de sobreposição real.
  *
  * Cobre: cenário obrigatório da §8; a mesma BET 50× em paralelo (§13 concorrência 1);
- * linhas 1, 2, 3, 24 e 26 da matriz pelo caminho da aplicação.
+ * linhas 1, 2, 3, 24 e 26 da matriz pelo caminho da aplicação. Revisão 02r: replays
+ * tardios (depois de o saldo mudar) provam o resultado ORIGINAL (§7.7, linha 6), e o
+ * mesmo id do provedor com keys diferentes em paralelo prova a camada 2 de D4.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { PoolClient } from "pg";
@@ -206,7 +208,12 @@ describe("§8 cenário obrigatório — 100.00 BRL, duas BETs de 80.00 simultân
     const winner = results.find((r) => r.status === 200);
     const loser = results.find((r) => r.status === 422);
     expect(winner?.body).toMatchObject({ status: "PROCESSED", balance: { amount: "20.00", currency: "BRL" }, idempotentReplay: false });
-    expect(loser?.body).toMatchObject({ status: "REJECTED", failureCode: "INSUFFICIENT_FUNDS", idempotentReplay: false });
+    expect(loser?.body).toMatchObject({
+      status: "REJECTED",
+      failureCode: "INSUFFICIENT_FUNDS",
+      balance: { amount: "20.00", currency: "BRL" },
+      idempotentReplay: false,
+    });
     const winnerTxId = stringField(winner?.body, "transactionId");
     const loserTxId = stringField(loser?.body, "transactionId");
 
@@ -250,10 +257,32 @@ describe("§8 cenário obrigatório — 100.00 BRL, duas BETs de 80.00 simultân
       transactionId: loserTxId,
       status: "REJECTED",
       failureCode: "INSUFFICIENT_FUNDS",
+      balance: { amount: "20.00", currency: "BRL" },
       idempotentReplay: true,
     });
 
-    expect(await walletRow(db.pool, walletId)).toEqual({ balance_amount: "20.00", version: 2 });
+    // o saldo muda DEPOIS (WIN 30.00 → 50.00); um retry tardio ainda devolve o resultado
+    // ORIGINAL (§7.7) — sem isto, "replay responde com o saldo atual" passaria despercebido
+    const win = await api.submit(bet(walletId, playerId, "s8-win", "30.00", { kind: "WIN" }));
+    expect(win.status).toBe(200);
+    expect(win.body).toMatchObject({ status: "PROCESSED", balance: { amount: "50.00", currency: "BRL" } });
+    const late = await Promise.all(bodies.map((b) => api.submit(b)));
+    expect(statusesOf(late)).toEqual([200, 422]);
+    expect(late.find((r) => r.status === 200)?.body).toMatchObject({
+      transactionId: winnerTxId,
+      status: "PROCESSED",
+      balance: { amount: "20.00", currency: "BRL" },
+      idempotentReplay: true,
+    });
+    expect(late.find((r) => r.status === 422)?.body).toMatchObject({
+      transactionId: loserTxId,
+      status: "REJECTED",
+      failureCode: "INSUFFICIENT_FUNDS",
+      balance: { amount: "20.00", currency: "BRL" },
+      idempotentReplay: true,
+    });
+
+    expect(await walletRow(db.pool, walletId)).toEqual({ balance_amount: "50.00", version: 3 });
     expect(await transactionsOf(walletId, "BET")).toHaveLength(2);
     expect((await ledgerOf(walletId)).filter((e) => e.direction === "DEBIT")).toHaveLength(1);
     // eventos do mesmo commit, sem duplicata por causa dos retries
@@ -320,6 +349,60 @@ describe("§13 concorrência 1 — a mesma BET 50× em paralelo via HTTP (linha 
       },
     ]);
     expect(await walletRow(db.pool, walletId)).toEqual({ balance_amount: "990.00", version: 2 });
+    expect(await outboxCount(txId, "WagerTransactionProcessed")).toBe(1);
+    expect(await outboxCount(txId, "WalletBalanceChanged")).toBe(1);
+
+    // replay tardio, depois de outra BET ter mudado o saldo: continua 990.00 (§7.7)
+    const other = await api.submit(bet(walletId, playerId, "after-50x", "5.00"));
+    expect(other.status).toBe(200);
+    expect(other.body).toMatchObject({ status: "PROCESSED", balance: { amount: "985.00", currency: "BRL" } });
+    const late = await api.submit(body);
+    expect(late.status).toBe(200);
+    expect(late.body).toMatchObject({
+      transactionId: txId,
+      status: "PROCESSED",
+      balance: { amount: "990.00", currency: "BRL" },
+      idempotentReplay: true,
+    });
+    expect(await walletRow(db.pool, walletId)).toEqual({ balance_amount: "985.00", version: 3 });
+    expect(await transactionsOf(walletId, "BET")).toHaveLength(2);
+    expect(await outboxCount(txId, "WagerTransactionProcessed")).toBe(1);
+    await assertGlobalInvariants(db.pool);
+  }, 60_000);
+
+  test("mesmo (providerId, externalTransactionId) com 10 Idempotency-Keys DIFERENTES em paralelo → 1 débito, 9 × 409", async () => {
+    // camada 2 de D4: a key é do cliente, o id do provedor é da operação. Sem o UNIQUE
+    // (provider, external) + tratamento do 23505, cada key nova debitaria de novo.
+    const PARALLEL = 10;
+    const playerId = newPlayerId();
+    const walletId = await openWalletViaApi(api, playerId, brl("100.00"));
+    const body = bet(walletId, playerId, "same-ext-many-keys", "10.00");
+
+    const { results, maxWaiters } = await contend({
+      pool: db.pool,
+      hold: holdWalletRow(walletId),
+      run: () => launchTogether(PARALLEL, (i) => api.submit(body, `client-key-${i}-${walletId}`)),
+      expectedWaiters: PARALLEL,
+    });
+
+    expect(maxWaiters).toBeGreaterThanOrEqual(PARALLEL);
+    expect(statusesOf(results)).toEqual([200, ...Array.from({ length: PARALLEL - 1 }, () => 409)]);
+    const winner = results.find((r) => r.status === 200);
+    expect(winner?.body).toMatchObject({
+      status: "PROCESSED",
+      balance: { amount: "90.00", currency: "BRL" },
+      idempotentReplay: false,
+    });
+    for (const r of results.filter((x) => x.status === 409)) {
+      expect(r.body).toMatchObject({ error: { code: "IDEMPOTENCY_CONFLICT" } });
+    }
+    const txId = stringField(winner?.body, "transactionId");
+
+    const bets = await transactionsOf(walletId, "BET");
+    expect(bets).toHaveLength(1);
+    expect(bets[0]).toMatchObject({ id: txId, status: "PROCESSED", result_balance_amount: "90.00" });
+    expect((await ledgerOf(walletId)).filter((e) => e.direction === "DEBIT")).toHaveLength(1);
+    expect(await walletRow(db.pool, walletId)).toEqual({ balance_amount: "90.00", version: 2 });
     expect(await outboxCount(txId, "WagerTransactionProcessed")).toBe(1);
     expect(await outboxCount(txId, "WalletBalanceChanged")).toBe(1);
     await assertGlobalInvariants(db.pool);

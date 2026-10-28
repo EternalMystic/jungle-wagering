@@ -3,7 +3,7 @@
  *
  * 1. Um banco-template é migrado UMA vez com o comando de produção
  *    (`bun run scripts/migrate.ts up`), num processo separado. O nome do template
- *    carrega o hash de `migrations/`: mudou uma migration → template novo.
+ *    carrega o hash de tudo que decide o schema (`SCHEMA_INPUTS`): mudou → template novo.
  * 2. Cada arquivo de teste ganha `CREATE DATABASE … TEMPLATE <template>` (cópia
  *    física, ~ms) e o apaga no fim com `DROP DATABASE … WITH (FORCE)`.
  *
@@ -13,7 +13,7 @@
  */
 import { Client, Pool } from "pg";
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../src/infrastructure/config/app-config";
 import { databaseUrlFor } from "./postgres";
@@ -48,13 +48,36 @@ async function withAdmin<T>(fn: (c: Client) => Promise<T>): Promise<T> {
   }
 }
 
-function migrationsFingerprint(): string {
-  const dir = join(REPO_ROOT, "migrations");
-  const hash = createHash("sha256");
-  for (const file of readdirSync(dir).sort()) {
-    hash.update(file);
-    hash.update(readFileSync(join(dir, file)));
+/**
+ * Tudo o que decide o schema produzido por `migrate.ts up`: as migrations (recursivo:
+ * podem ter SQL em subpastas), o próprio script, a camada de persistência que ele importa
+ * (`initOrm`/`migrateUp` e eventuais .sql lá dentro) e o lockfile/package.json (versão do ORM).
+ * Se algo fora disto influenciar o schema, o template velho seria reaproveitado em silêncio
+ * e os testes de schema rodariam contra o banco errado — inclua aqui.
+ */
+const SCHEMA_INPUTS = [
+  "migrations",
+  "scripts/migrate.ts",
+  "src/infrastructure/persistence",
+  "package.json",
+  "bun.lock",
+  "bun.lockb",
+];
+
+function hashPath(hash: ReturnType<typeof createHash>, relative: string): void {
+  const full = join(REPO_ROOT, relative);
+  if (!existsSync(full)) return;
+  if (statSync(full).isDirectory()) {
+    for (const entry of readdirSync(full).sort()) hashPath(hash, `${relative}/${entry}`);
+    return;
   }
+  hash.update(relative);
+  hash.update(readFileSync(full));
+}
+
+function migrationsFingerprint(): string {
+  const hash = createHash("sha256");
+  for (const input of SCHEMA_INPUTS) hashPath(hash, input);
   return hash.digest("hex").slice(0, 16);
 }
 

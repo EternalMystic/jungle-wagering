@@ -6,7 +6,9 @@
  * statement ou no COMMIT (constraint triggers diferidos). Depois confere que o estado
  * do banco não mudou e roda `assertGlobalInvariants`.
  *
- * Matriz (docs/INVARIANTES.md): linhas 1, 2, 3, 7, 8, 19, 24, 26.
+ * Matriz (docs/INVARIANTES.md): linhas 1, 2, 3, 7, 8, 19, 23, 24, 26.
+ * Revisão 02r: recusas de CHECK exigem também ONDE (statement × COMMIT) e QUAL
+ * constraint, para que nenhum ataque passe por acidente com outro 23514.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -27,6 +29,7 @@ import {
 const CHECK_VIOLATION = "23514";
 const UNIQUE_VIOLATION = "23505";
 const RESTRICT_VIOLATION = "23001";
+const FOREIGN_KEY_VIOLATION = "23503";
 
 let db: IsolatedDatabase;
 
@@ -61,8 +64,11 @@ describe("linha 1 — saldo nunca negativo (CHECK no schema)", () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
 
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, (c) =>
-      c.query("UPDATE wallets SET balance_amount = -0.01, version = version + 1 WHERE id = $1", [w.walletId]),
+    // tem de ser o CHECK da coluna (imediato), não o trigger diferido que também recusaria
+    await expectRejectedBySchema(
+      db.pool,
+      { code: CHECK_VIOLATION, at: "statement", check: { table: "wallets", definition: /balance_amount >= / } },
+      (c) => c.query("UPDATE wallets SET balance_amount = -0.01, version = version + 1 WHERE id = $1", [w.walletId]),
     );
 
     expect(await snapshot(w)).toEqual(before);
@@ -74,7 +80,8 @@ describe("linha 1 — saldo nunca negativo (CHECK no schema)", () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
 
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, async (c) => {
+    const check = { table: "wallet_ledger_entries", definition: /balance_after >= / };
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "statement", check }, async (c) => {
       const tx = await insertTx(c, w, { kind: "BET", amount: "150.00", status: "PENDING" });
       await insertLedger(c, w, { txId: tx.id, direction: "DEBIT", amount: "150.00", before: "100.00", after: "-50.00", version: 2 });
       await c.query("UPDATE wallets SET balance_amount = -50.00, version = 2 WHERE id = $1", [w.walletId]);
@@ -189,10 +196,12 @@ describe("linha 3 — débito/crédito nunca duplicado (UNIQUEs)", () => {
 });
 
 describe("linha 7 — toda mudança de saldo ⇔ lançamento (constraint triggers diferidos)", () => {
+  // `at: "commit"` em toda a linha 7: prova que a recusa veio do constraint trigger
+  // DIFERIDO, e não de um CHECK imediato disparado por alguma linha forjada inválida.
   test("mudar o saldo sem lançamento é recusado no COMMIT", async () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, (c) =>
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, (c) =>
       c.query("UPDATE wallets SET balance_amount = 90.00, version = version + 1 WHERE id = $1", [w.walletId]),
     );
     expect(await snapshot(w)).toEqual(before);
@@ -202,7 +211,7 @@ describe("linha 7 — toda mudança de saldo ⇔ lançamento (constraint trigger
   test("lançamento órfão (a wallet não acompanha) é recusado no COMMIT", async () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, async (c) => {
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, async (c) => {
       const tx = await insertTx(c, w, { kind: "WIN", amount: "10.00", status: "PENDING" });
       await insertLedger(c, w, { txId: tx.id, direction: "CREDIT", amount: "10.00", before: "100.00", after: "110.00", version: 2 });
     });
@@ -213,7 +222,7 @@ describe("linha 7 — toda mudança de saldo ⇔ lançamento (constraint trigger
   test("lançamento que não explica a mudança (balance_before ≠ saldo anterior) é recusado", async () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, async (c) => {
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, async (c) => {
       const tx = await insertTx(c, w, { kind: "WIN", amount: "10.00", status: "PENDING" });
       await insertLedger(c, w, { txId: tx.id, direction: "CREDIT", amount: "10.00", before: "50.00", after: "60.00", version: 2 });
       await c.query("UPDATE wallets SET balance_amount = 60.00, version = 2 WHERE id = $1", [w.walletId]);
@@ -224,7 +233,7 @@ describe("linha 7 — toda mudança de saldo ⇔ lançamento (constraint trigger
 
   test("wallet aberta com saldo sem crédito OPENING é recusada no COMMIT", async () => {
     const playerId = randomUUID();
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, (c) =>
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, (c) =>
       c.query("INSERT INTO wallets (id, player_id, currency, balance_amount, version) VALUES ($1, $2, 'BRL', 50.00, 1)", [
         randomUUID(),
         playerId,
@@ -315,6 +324,34 @@ describe("linha 19 — uma transação é revertida no máximo uma vez (uq_tx_si
   });
 });
 
+describe("linha 23 — a moeda do lançamento é a da wallet (FK composta)", () => {
+  test("lançamento USD numa wallet BRL é recusado por fk_ledger_wallet_currency (23503)", async () => {
+    const w = await openWalletBySql(db.pool, "100.00");
+    const before = await snapshot(w);
+    // a transação USD existe (no gabarito a moeda da transação não tem FK, para que um
+    // REJECTED/CURRENCY_MISMATCH seja auditável), então só a FK (wallet_id, currency) do ledger recusa
+    await expectRejectedBySchema(
+      db.pool,
+      { code: FOREIGN_KEY_VIOLATION, constraint: "fk_ledger_wallet_currency" },
+      async (c) => {
+        const tx = await insertTx(c, w, { kind: "WIN", amount: "10.00", status: "PENDING", currency: "USD" });
+        await insertLedger(c, w, {
+          txId: tx.id,
+          direction: "CREDIT",
+          amount: "10.00",
+          before: "100.00",
+          after: "110.00",
+          version: 2,
+          currency: "USD",
+        });
+        await c.query("UPDATE wallets SET balance_amount = 110.00, version = 2 WHERE id = $1", [w.walletId]);
+      },
+    );
+    expect(await snapshot(w)).toEqual(before);
+    await assertGlobalInvariants(db.pool);
+  });
+});
+
 describe("linha 24 — uma wallet por player + moeda (uq_wallet_player_currency)", () => {
   test("segunda wallet BRL do mesmo player é recusada", async () => {
     const w = await openWalletBySql(db.pool, "0.00");
@@ -348,7 +385,7 @@ describe("linha 24 — uma wallet por player + moeda (uq_wallet_player_currency)
 describe("linha 26 — version nasce 1 e só sobe (de 1 em 1) quando o saldo muda", () => {
   test("wallet criada com version 2 é recusada", async () => {
     const playerId = randomUUID();
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, (c) =>
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, (c) =>
       c.query("INSERT INTO wallets (id, player_id, currency, balance_amount, version) VALUES ($1, $2, 'BRL', 0, 2)", [
         randomUUID(),
         playerId,
@@ -362,7 +399,7 @@ describe("linha 26 — version nasce 1 e só sobe (de 1 em 1) quando o saldo mud
   test("incrementar version sem mudar o saldo é recusado", async () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, (c) =>
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, (c) =>
       c.query("UPDATE wallets SET version = version + 1 WHERE id = $1", [w.walletId]),
     );
     expect(await snapshot(w)).toEqual(before);
@@ -372,7 +409,7 @@ describe("linha 26 — version nasce 1 e só sobe (de 1 em 1) quando o saldo mud
   test("mudança de saldo que pula versão (v1 → v3) é recusada mesmo com lançamento", async () => {
     const w = await openWalletBySql(db.pool, "100.00");
     const before = await snapshot(w);
-    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION }, async (c) => {
+    await expectRejectedBySchema(db.pool, { code: CHECK_VIOLATION, at: "commit" }, async (c) => {
       const tx = await insertTx(c, w, { kind: "WIN", amount: "10.00", status: "PENDING" });
       await insertLedger(c, w, { txId: tx.id, direction: "CREDIT", amount: "10.00", before: "100.00", after: "110.00", version: 3 });
       await c.query("UPDATE wallets SET balance_amount = 110.00, version = 3 WHERE id = $1", [w.walletId]);

@@ -212,6 +212,21 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
 - Eventos na outbox são localizados por `payload -> 'data' ->> 'transactionId'` (mesma
   convenção de `reference/sql/invariants.sql` I6/I7).
 
+## D17. Régua endurecida na revisão 02r [autopilot]
+
+- Ataques de CHECK conferem ONDE a recusa acontece (`at: statement | commit`) e QUAL
+  constraint (`pg_get_constraintdef` casando com a regra). Logo, a migration real precisa:
+  não-negatividade como CHECK de coluna imediato em `wallets.balance_amount` e
+  `wallet_ledger_entries.balance_after`; coerência wallet ⇔ ledger e regras de `version`
+  como constraint triggers DIFERIDOS (como no gabarito).
+- Mesmo `(providerId, externalTransactionId)` com `Idempotency-Key` diferente, inclusive em
+  paralelo → exatamente um efeito e **409 `IDEMPOTENCY_CONFLICT`** para os demais (D4), via
+  `uq_tx_provider_external` + tratamento do 23505 (rollback, releitura).
+- Replay tardio (depois de o saldo mudar) devolve o saldo ORIGINAL — testado na aceitação.
+- O template de testes é indexado pelo hash de `migrations/**`, `scripts/migrate.ts`,
+  `src/infrastructure/persistence/**` e lockfile; schema decidido fora disso não é visto.
+- Detalhes e achados: `docs/REVISAO-ACEITACAO.md`.
+
 ## D15. Readiness [autopilot]
 
 - `/health/ready` roda os probes em paralelo, cada um com prazo (`READINESS_TIMEOUT_MS`,

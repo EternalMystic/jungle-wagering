@@ -27,8 +27,13 @@ export function loadInvariantQueries(): InvariantQuery[] {
     if (!label || !/\bselect\b/i.test(sql)) continue;
     queries.push({ label, sql });
   }
-  if (queries.length < 8) {
-    throw new Error(`invariants.sql: esperadas ≥ 8 consultas (I1–I8), encontradas ${queries.length}`);
+  // cada I1..I8 precisa ter sido lida como consulta própria: um erro de parsing que
+  // fundisse duas consultas (ou perdesse uma) deixaria uma invariante sem verificação
+  const labels = queries.map((q) => q.label.match(/^I\d+/)?.[0]);
+  for (let i = 1; i <= 8; i++) {
+    if (labels.filter((l) => l === `I${i}`).length !== 1) {
+      throw new Error(`invariants.sql: I${i} não foi lida exatamente uma vez (lidas: ${labels.join(", ")})`);
+    }
   }
   return queries;
 }

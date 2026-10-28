@@ -86,21 +86,41 @@ export function asPgFailure(error: unknown): PgFailure {
   };
 }
 
+export interface ExpectedRejection {
+  readonly code: string;
+  /** nome exato da constraint (UNIQUE/FK nomeadas no gabarito) */
+  readonly constraint?: string;
+  /**
+   * Onde a recusa tem de acontecer. `commit` prova que veio de um constraint trigger
+   * DIFERIDO (e não de um CHECK imediato qualquer disparado por uma linha forjada mal);
+   * `statement` prova que veio de uma constraint imediata.
+   */
+  readonly at?: "statement" | "commit";
+  /**
+   * Para CHECK de coluna (nome gerado pelo Postgres): a constraint violada precisa
+   * pertencer a `table` e sua definição (`pg_get_constraintdef`) casar com `definition`.
+   * Evita passar por acidente com outro 23514.
+   */
+  readonly check?: { readonly table: string; readonly definition: RegExp };
+}
+
 /**
  * Executa `fn` numa transação e exige que ela FALHE com o SQLSTATE `code` — no
  * próprio statement ou no COMMIT (constraint triggers diferidos disparam ali).
- * Se o banco aceitar, o teste falha. Opcionalmente confere o nome da constraint.
+ * Se o banco aceitar, o teste falha. Opcionalmente confere a constraint e o momento.
  */
 export async function expectRejectedBySchema(
   pool: Pool,
-  expected: { code: string; constraint?: string },
+  expected: ExpectedRejection,
   fn: (c: PoolClient) => Promise<unknown>,
 ): Promise<PgFailure> {
   const c = await pool.connect();
   let failure: PgFailure | undefined;
+  let phase: "statement" | "commit" = "statement";
   try {
     await c.query("BEGIN");
     await fn(c);
+    phase = "commit";
     await c.query("COMMIT");
   } catch (error) {
     failure = asPgFailure(error);
@@ -113,6 +133,21 @@ export async function expectRejectedBySchema(
   }
   expect({ code: failure.code, message: failure.message }).toEqual({ code: expected.code, message: failure.message });
   if (expected.constraint !== undefined) expect(failure.constraint).toBe(expected.constraint);
+  if (expected.at !== undefined) {
+    expect({ at: phase, message: failure.message }).toEqual({ at: expected.at, message: failure.message });
+  }
+  if (expected.check !== undefined) {
+    const res = await pool.query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def
+         FROM pg_constraint
+        WHERE conname = $1 AND conrelid = $2::regclass AND contype = 'c'`,
+      [failure.constraint ?? "", expected.check.table],
+    );
+    expect({ constraint: failure.constraint, definition: res.rows[0]?.def ?? null }).toEqual({
+      constraint: failure.constraint,
+      definition: expect.stringMatching(expected.check.definition),
+    });
+  }
   return failure;
 }
 
