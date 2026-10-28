@@ -31,13 +31,13 @@ const FIFO_ATTRIBUTES = {
 
 async function describe(sqs: SQSClient, name: string, url: string): Promise<QueueInfo> {
   const res = await sqs.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ["All"] }));
-  const attributes = res.Attributes ?? {};
+  const attributes: Record<string, string | undefined> = res.Attributes ?? {};
   const arn = attributes.QueueArn;
   if (!arn) throw new Error(`fila ${name} sem QueueArn`);
   return { name, url, arn, attributes };
 }
 
-const ALREADY_EXISTS = new Set(["QueueAlreadyExists", "QueueNameExists"]);
+const ALREADY_EXISTS: readonly string[] = ["QueueAlreadyExists", "QueueNameExists"];
 
 async function createFifo(sqs: SQSClient, name: string, extra: Record<string, string> = {}): Promise<string> {
   const Attributes = { ...FIFO_ATTRIBUTES, VisibilityTimeout: String(WAGER_VISIBILITY_TIMEOUT_SECONDS), ...extra };
@@ -47,7 +47,7 @@ async function createFifo(sqs: SQSClient, name: string, extra: Record<string, st
     return res.QueueUrl;
   } catch (error) {
     // fila já existe com atributos diferentes: reaproveita e converge via SetQueueAttributes
-    if (!(error instanceof Error) || !ALREADY_EXISTS.has(error.name)) throw error;
+    if (!(error instanceof Error) || !ALREADY_EXISTS.includes(error.name)) throw error;
     const res = await sqs.send(new GetQueueUrlCommand({ QueueName: name }));
     if (!res.QueueUrl) throw new Error(`GetQueueUrl ${name} não devolveu QueueUrl`);
     await sqs.send(new SetQueueAttributesCommand({ QueueUrl: res.QueueUrl, Attributes: { VisibilityTimeout: Attributes.VisibilityTimeout, ...extra } }));
@@ -60,7 +60,7 @@ export function redrivePolicy(deadLetterTargetArn: string, maxReceiveCount: numb
 }
 
 /**
- * Cria (idempotente) a topologia de filas: entrada FIFO com redrive para a DLQ FIFO
+ * Cria (reexecutável) a topologia de filas: entrada FIFO com redrive para a DLQ FIFO
  * e a fila FIFO de eventos de integração (outbox). A RedrivePolicy é reaplicada com
  * SetQueueAttributes para que reexecuções convirjam ao estado esperado.
  */

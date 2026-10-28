@@ -1,0 +1,2 @@
+export const READINESS_PROBES = Symbol("READINESS_PROBES");
+export const READINESS_TIMEOUT_MS = Symbol("READINESS_TIMEOUT_MS");

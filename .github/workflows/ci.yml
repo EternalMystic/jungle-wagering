@@ -3,12 +3,9 @@
 # Com GitHub Pro, proteja o ramo main exigindo este check verde antes do merge
 # (Settings → Branches → Branch protection → Require status checks: "ci").
 #
-# AJUSTE no spike (Dia 1): o emulador de SQS.
-#   - LocalStack: desde 23/03/2026 a imagem atual exige conta e token. Crie conta
-#     gratuita, gere um CI auth token e salve como secret LOCALSTACK_AUTH_TOKEN.
-#   - MiniStack (MIT, sem token): troque a imagem por ministackorg/ministack e o
-#     health para /_ministack/ready — mas CONFIRME no spike que FIFO + RedrivePolicy
-#     funcionam; se a redrive não funcionar, o envio explícito à DLQ (D9) continua valendo.
+# Emulador de SQS: MiniStack (sem token), decidido no spike — ver docs/DECISOES.md D13.
+# Se test/integration/sqs-emulator.test.ts ficar vermelho no MiniStack, a troca é por
+# localstack/localstack com o secret LOCALSTACK_AUTH_TOKEN (imagem atual exige token).
 
 name: ci
 
@@ -37,15 +34,14 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s --health-timeout 5s --health-retries 30
+      # MiniStack (MIT, sem token) — D13. test/integration/sqs-emulator.test.ts prova
+      # FIFO, MessageGroupId, MessageDeduplicationId e RedrivePolicy neste emulador.
       sqs:
-        image: localstack/localstack
-        env:
-          SERVICES: sqs
-          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+        image: ministackorg/ministack:latest
         ports: ["4566:4566"]
         options: >-
-          --health-cmd "curl -fs http://localhost:4566/_localstack/health"
-          --health-interval 3s --health-timeout 5s --health-retries 40
+          --health-cmd "python3 -c 'import socket;socket.create_connection((\"127.0.0.1\",4566),2)'"
+          --health-interval 3s --health-timeout 5s --health-retries 40 --health-start-period 5s
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/wagering

@@ -158,3 +158,35 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
 `sqs_dlq_total{reason}`, `lock_conflicts_total`, `outbox_lag_seconds`,
 `wager_processing_seconds` (histograma), `reconciliation_divergences_total`.
 `/health/live` (processo) e `/health/ready` (`SELECT 1` + `GetQueueUrl`), ambos sem auth.
+
+## D13. Emulador SQS: MiniStack [autopilot]
+
+- `ministackorg/ministack` (MIT, porta 4566, sem token) no `docker-compose.yml` e no CI.
+  A imagem atual do LocalStack exige conta/token; o MiniStack não.
+- Condição: `test/integration/sqs-emulator.test.ts` prova, contra o emulador real, FIFO
+  (recusa envio sem `MessageGroupId`, ordem por grupo), bloqueio do grupo com mensagem em
+  voo, `MessageDeduplicationId` e `RedrivePolicy` (entregue exatamente `maxReceiveCount`
+  vezes, depois aparece na DLQ). Se esse arquivo ficar vermelho, troca-se para
+  `localstack/localstack` com `LOCALSTACK_AUTH_TOKEN` do ambiente (registrar aqui e no README).
+- Mesmo com a redrive funcionando, o envio EXPLÍCITO à DLQ para erros permanentes (D9)
+  continua: não dependemos de esgotar 5 recebimentos para tirar um veneno do grupo FIFO.
+- Healthcheck: a imagem pode não ter curl; o compose testa a porta com python/curl/wget.
+
+## D14. Infra local e scripts [autopilot]
+
+- Postgres do compose publicado na **55432** do host (a 5432 costuma estar ocupada por
+  outro Postgres da máquina — ocorreu no ambiente do autopilot). `DATABASE_URL` sobrescreve.
+- `verify:schema` roda `scripts/verify-schema.ts`, que só injeta o `DATABASE_URL` do
+  projeto e importa `reference/verify-schema.ts` intacto. Motivo: o default do gabarito é
+  `localhost:5432` e apontaria para um Postgres alheio; `reference/` é congelado.
+- Migrations: o CLI do MikroORM não é usado (depende de ts-node/descoberta de config);
+  `scripts/migrate.ts` chama o `Migrator` programaticamente, com `migrationsList` explícita
+  (`migrations/index.ts`), `transactional` e `allOrNothing`. Round-trip testado em banco
+  descartável em `test/integration/stack.test.ts`.
+
+## D15. Readiness [autopilot]
+
+- `/health/ready` roda os probes em paralelo, cada um com prazo (`READINESS_TIMEOUT_MS`,
+  padrão 2 s); qualquer falha/timeout → 503 `{status:"unavailable", checks:{…:"down"}}`.
+  Postgres: `select 1` num fork do EM; SQS: `GetQueueUrl` da fila de entrada (prova que a
+  topologia existe, não só que a porta está aberta). `/health/live` não toca em dependências.
