@@ -233,3 +233,46 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   padrão 2 s); qualquer falha/timeout → 503 `{status:"unavailable", checks:{…:"down"}}`.
   Postgres: `select 1` num fork do EM; SQS: `GetQueueUrl` da fila de entrada (prova que a
   topologia existe, não só que a porta está aberta). `/health/live` não toca em dependências.
+
+## D18. Migration inicial e modelagem do domínio (fase 03) [autopilot]
+
+- **Migration**: o schema entra na `Migration20261028000000_initial` (era um spike vazio,
+  nunca usado fora de bancos descartáveis), com `up` = `reference/sql/001_schema.sql` e
+  `down` = `001_schema.down.sql`, um `addSql` por statement; o BEGIN/COMMIT vem do
+  Migrator (`transactional`). `disableForeignKeys: false` fixado na config: `true` faria
+  `session_replication_role = replica`, que desliga triggers (as garantias do schema).
+  Fidelidade provada em `test/integration/migrations.test.ts`: o catálogo (colunas,
+  constraints com deferrable/deferred, índices, triggers e `prosrc` das funções) do banco
+  migrado é IGUAL ao do gabarito aplicado cru; o down não deixa resíduo.
+- **Money**: `toString()` devolve só o valor ("975.00"); `toJSON()` devolve `MoneyProps`.
+  `equals` com moedas diferentes devolve `false`; `add/subtract/isLessThan/
+  isGreaterThanOrEqual` lançam `CurrencyMismatchError`. Resultado além de NUMERIC(20,2)
+  (|valor| > 999999999999999999.99) é `InvalidMoneyError` — nunca estouro silencioso.
+  `fromCents` existe para reconstrução interna; contratos usam `from` (regex D2).
+- **WagerTransaction**: `create` recusa `OPENING` (interno, só via `createOpening`, provider
+  `internal`, key `internal:opening-<walletId>`). Transições = tabela do trigger
+  `fn_tx_guard`; PENDING_REFERENCE → PENDING_REFERENCE é `scheduleReferenceRetry` (conta a
+  tentativa). `reject` exige `resultBalance` (saldo observado, na moeda da WALLET — pode
+  diferir em CURRENCY_MISMATCH) e recusa `WALLET_NOT_FOUND` (não persistível, D6) e códigos
+  de infra; `fail` só aceita códigos de infra. `markProcessed` exige saldo na moeda da
+  transação e, para REFUND/ROLLBACK, a referência interna (espelha os CHECKs do schema).
+- **Wallet**: `open` devolve `{ wallet, openingEntry }` (CREDIT v1 de 0.00 quando há saldo
+  inicial; nenhum lançamento com 0.00 — como o trigger de abertura). `credit/debit`
+  devolvem o lançamento e sobem `version` em 1; o lançamento é validado ANTES de o agregado
+  mudar (falha não deixa meio-estado). `debit` sem saldo lança `InsufficientFundsError`;
+  o use case consulta `canDebit` antes e escolhe `INSUFFICIENT_FUNDS` ×
+  `REVERSAL_INSUFFICIENT_FUNDS`.
+- **Eventos**: `aggregateId = walletId` para TODOS (inclusive os de transação): todos os
+  eventos de uma wallet caem no mesmo `MessageGroupId` e chegam ordenados. Campos ausentes
+  em `data` são `null` (schema JSON estável); `data` é congelado. `WalletBalanceChanged.from`
+  exige que o lançamento seja o último movimento da wallet.
+- **Outbox backoff**: `min(1 s · 2^(attempts−1), 5 min)`, sem limite de tentativas — evento
+  confirmado nunca é descartado; atraso aparece em `outbox_lag_seconds`. Lease/locks são
+  infraestrutura (SQL, D10), não domínio.
+- **Kinds/status/direção** são objeto `as const` + união de literais, não `enum` do TS: o
+  enum é nominal e recusaria `"BET"`/`"DEBIT"` vindos do banco/JSON sem cast nas
+  fronteiras (o typecheck do portão da fase 03 pegou isso). Uso igual: `WagerTransactionKind.Bet`.
+- **Hash (D4)**: `canonicalJson` recusa números/bigint/Date/Map (só string, boolean, null,
+  arrays e objetos planos); chaves ordenadas pela ordem de code unit UTF-16; `undefined`
+  omitido. O DTO deve normalizar `null` → ausente antes de montar o `WagerPayload`.
+  Domínio usa `node:crypto` (biblioteca padrão, não framework).

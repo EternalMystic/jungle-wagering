@@ -5,9 +5,37 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 02r — revisão cruzada da régua (feita; portão a confirmar pelo orquestrador)
-- Portões verdes: 01 (commit aa86d5b)
+- Fase atual: 03 — migration real + domínio (feita; portão a confirmar pelo orquestrador)
+- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c)
 - Sabotagens comprovadas (`/prove-red`): —
+
+## Fase 03 — feito (decisões em D18)
+
+- `migrations/Migration20261028000000_initial.ts`: up = `reference/sql/001_schema.sql`
+  inteiro (CHECKs, UNIQUEs parciais, FKs compostas, triggers append-only/guard e os 2
+  constraint triggers DIFERIDOS), down = `001_schema.down.sql`. `disableForeignKeys: false`
+  explícito no Migrator (senão os triggers seriam desligados durante a migration).
+- `test/integration/migrations.test.ts`: round-trip up → down → up + catálogo migrado
+  IDÊNTICO ao gabarito cru (colunas, constraints, índices, triggers, corpo das funções) +
+  down sem resíduo.
+- `src/domain/` (sem framework; só `node:crypto`): `money.ts`, `errors.ts`,
+  `failure-codes.ts` (D6), `payload-hash.ts` (D4), `wallet.ts`, `ledger-entry.ts`,
+  `wager-transaction.ts`, `inbox-message.ts`, `outbox-message.ts`, `events/*` (abstrato +
+  `WagerTransactionProcessed`, `WagerTransactionRejected`, `WagerTransactionPendingReference`,
+  `WalletBalanceChanged`).
+- `test/unit/domain/`: `money` (tabela de 26 entradas inválidas, não-string em runtime,
+  moedas, aritmética exata, teto NUMERIC(20,2), conflito de moeda), `wallet-and-ledger`
+  (§8 no domínio, aritmética do lançamento, imutabilidade), `wager-transaction`
+  (transições, terminais imutáveis, direção do ROLLBACK), `payload-hash` (canônico escrito
+  à mão, cada campo muda o hash), `messages-and-events` (inbox, outbox/backoff, envelopes),
+  `purity` (domínio só importa o próprio domínio/`node:crypto`).
+- TDD: os testes foram escritos antes da implementação, mas **o vermelho/verde não pôde ser
+  mostrado** — nesta sessão o modo de permissão bloqueou `bun`, `docker` e `tsc` de novo
+  (nenhum comando do portão executado pelo agente). Varredura de `rules.ts` feita à mão com
+  Grep: domínio sem violações.
+- Suspeitos se o portão falhar: inferência de `test.each` com tabelas heterogêneas;
+  cast do envelope em `OutboxMessage.enqueue`; `Array.isArray` sobre `readonly` em
+  `canonicalJson`; construtor protegido herdado nos eventos (`new X()` no `static from`).
 
 ## Fase 02 — feito
 
@@ -87,5 +115,7 @@ transação (404 nos testes HTTP). Decisões novas: D16 em `docs/DECISOES.md`.
 
 ## Próxima ação
 
-- Orquestrador roda o portão da fase 02r (aceitação deve FALHAR). Humano: ler a seção 4 de
-  `docs/REVISAO-ACEITACAO.md`. Depois: fase 03 (schema + domínio), honrando D16 e D17.
+- Orquestrador roda o portão da fase 03. Com a migration real, os testes de SCHEMA da
+  aceitação devem passar a ficar verdes; os HTTP continuam vermelhos (sem rotas).
+- Próxima fase: persistência (EntitySchema + mappers ↔ `rehydrate`) e use cases, honrando
+  D16, D17 e D18. Rodar `/prove-red` nas garantias de schema (linhas 7, 8, 19 da matriz).

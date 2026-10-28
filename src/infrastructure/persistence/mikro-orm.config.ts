@@ -21,6 +21,8 @@ export function mikroOrmConfig(config: AppConfig) {
       migrationsList,
       transactional: true,
       allOrNothing: true,
+      // true faria `session_replication_role = replica`, que DESLIGA os triggers do schema
+      disableForeignKeys: false,
       snapshot: false,
       emit: "ts",
     },
