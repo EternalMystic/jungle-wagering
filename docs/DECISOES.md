@@ -184,6 +184,34 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   (`migrations/index.ts`), `transactional` e `allOrNothing`. Round-trip testado em banco
   descartável em `test/integration/stack.test.ts`.
 
+## D16. Contrato dos testes de aceitação [autopilot]
+
+- Caixa-preta: a aplicação sobe como PROCESSO (`bun run src/main.ts`) e é acessada por
+  HTTP; o banco é preparado pelo comando de produção (`scripts/migrate.ts up`) num
+  template (`wagering_tpl_<hash de migrations/>`) e cada arquivo ganha
+  `CREATE DATABASE … TEMPLATE`. Os testes só dependem de `src/` para ler config e criar filas.
+- Ambiente que a aplicação PRECISA respeitar: `DATABASE_URL`, `PORT`, `SQS_WAGER_QUEUE`,
+  `SQS_WAGER_DLQ`, `SQS_WALLET_EVENTS_QUEUE` (filas exclusivas por arquivo de teste) e
+  **`DB_POOL_MAX`** (tamanho do pool do processo; os testes passam 60). Sem isso, a BET
+  50× não consegue ter as 50 requisições dentro do banco ao mesmo tempo e o teste falha.
+- Prova de paralelismo (`test/support/concurrency.ts#contend`): o teste segura o recurso
+  disputado (linha da wallet `FOR UPDATE`, ou a chave única player+moeda com INSERT não
+  confirmado), dispara as requisições atrás de uma barreira e só solta quando
+  `pg_stat_activity` mostra N backends em `wait_event_type = 'Lock'`. Segura no máximo 3 s;
+  portanto o `lock_timeout` da aplicação (D3) tem de ser **> 3 s** (D3 sugere 5 s).
+- `POST /wallets` bem-sucedido → **201** com `{id, playerId, balance, version}`.
+- Resposta de rejeição (422) tem o MESMO formato da de sucesso: `transactionId, status:
+  "REJECTED", failureCode, balance, idempotentReplay`. O replay devolve o mesmo status (D5).
+- Transação REJECTED congela em `result_balance_amount` o saldo observado sob o lock
+  (no cenário §8 o perdedor registra 20.00, não 100.00) — é o "saldo observado naquele
+  momento" de §7.7.
+- Nomes de constraint do gabarito (`uq_tx_idempotency_key`, `uq_tx_provider_external`,
+  `uq_ledger_one_entry_per_tx_wallet`, `uq_ledger_wallet_version`, `uq_tx_single_reversal`,
+  `uq_wallet_player_currency`) são contrato: os testes de schema conferem o nome, não só o
+  SQLSTATE (para não passar por acidente com outro erro).
+- Eventos na outbox são localizados por `payload -> 'data' ->> 'transactionId'` (mesma
+  convenção de `reference/sql/invariants.sql` I6/I7).
+
 ## D15. Readiness [autopilot]
 
 - `/health/ready` roda os probes em paralelo, cada um com prazo (`READINESS_TIMEOUT_MS`,
