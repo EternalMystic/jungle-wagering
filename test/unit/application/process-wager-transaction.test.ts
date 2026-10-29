@@ -66,6 +66,16 @@ class FakeStore {
         },
       },
       transactions: {
+        lockById: async (id) => {
+          const t = this.transactions.find((t) => t.id === id);
+          return t && WagerTransaction.rehydrate(t.toState());
+        },
+        findPendingReferencing: async (wallet, provider, external, limit) => this.transactions
+          .filter((t) => t.walletId === wallet && t.providerId === provider && t.referenceExternalTransactionId === external && t.status === "PENDING_REFERENCE")
+          .slice(0, limit).map((t) => WagerTransaction.rehydrate(t.toState())),
+        savePending: async (t) => {
+          this.transactions = this.transactions.map((x) => x.id === t.id ? WagerTransaction.rehydrate(t.toState()) : x);
+        },
         findById: async (id) => this.transactions.find((t) => t.id === id),
         findByIdempotencyKey: async (key) => this.transactions.find((t) => t.idempotencyKey === key),
         findByProviderExternalId: async (p, e) => this.transactions.find((t) => t.providerId === p && t.externalTransactionId === e),

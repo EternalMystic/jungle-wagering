@@ -1,6 +1,7 @@
 import { isFailureCode } from "../../domain/failure-codes";
 import { InboxMessage } from "../../domain/inbox-message";
 import { Money } from "../../domain/money";
+import { OutboxMessage } from "../../domain/outbox-message";
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../../domain/wager-transaction";
 import { Wallet } from "../../domain/wallet";
 
@@ -16,7 +17,7 @@ type DbInteger = number | string;
 /** Saída textual do Postgres para TIMESTAMPTZ: `2026-10-29 21:21:20.93+00` (fração e minutos do offset opcionais). */
 const PG_TIMESTAMPTZ = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d+))?([+-]\d{2})(?::?(\d{2}))?$/;
 
-function toDate(value: DbTimestamp): Date {
+export function toDate(value: DbTimestamp): Date {
   let date: Date;
   if (value instanceof Date) {
     date = value;
@@ -163,4 +164,24 @@ export function inboxFromRecord(r: InboxRecord): InboxMessage {
     receivedAt: toDate(r.received_at),
     processedAt: toOptionalDate(r.processed_at),
   });
+}
+
+export interface OutboxRecord {
+  readonly id: string;
+  readonly aggregate_id: string;
+  readonly event_type: string;
+  readonly event_version: DbInteger;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly occurred_at: DbTimestamp;
+  readonly attempts: DbInteger;
+  readonly next_attempt_at: DbTimestamp;
+  readonly published_at: DbTimestamp | null;
+  readonly last_error: string | null;
+}
+
+export function outboxFromRecord(r: OutboxRecord): OutboxMessage {
+  return OutboxMessage.rehydrate({ id: r.id, aggregateId: r.aggregate_id, eventType: r.event_type,
+    eventVersion: toInteger(r.event_version), payload: r.payload, occurredAt: toDate(r.occurred_at),
+    attempts: toInteger(r.attempts), nextAttemptAt: toDate(r.next_attempt_at),
+    publishedAt: toOptionalDate(r.published_at), lastError: r.last_error ?? undefined });
 }

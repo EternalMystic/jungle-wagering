@@ -1,4 +1,5 @@
 import { type FaultPoint, isFaultPoint } from "../../application/ports/fault-injector";
+import { randomUUID } from "node:crypto";
 
 /**
  * Configuração do processo, lida do ambiente uma única vez na borda.
@@ -18,6 +19,7 @@ export interface AwsConfig {
 }
 
 export interface AppConfig {
+  readonly instanceId: string;
   readonly databaseUrl: string;
   readonly aws: AwsConfig;
   readonly queues: QueueNames;
@@ -145,6 +147,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
   }
   return {
     databaseUrl: url(env, "DATABASE_URL", DEFAULT_DATABASE_URL, ["postgres:", "postgresql:"]),
+    instanceId: nonEmpty(env, "INSTANCE_ID", randomUUID()),
     aws: {
       endpoint: url(env, "AWS_ENDPOINT_URL", "http://localhost:4566", ["http:", "https:"]),
       region: nonEmpty(env, "AWS_REGION", "us-east-1"),

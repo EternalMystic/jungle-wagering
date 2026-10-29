@@ -1,15 +1,7 @@
 import { DomainError } from "../domain/errors";
-import type { IntegrationEvent } from "../domain/events/integration-event";
-import {
-  WagerTransactionPendingReference,
-  WagerTransactionProcessed,
-  WagerTransactionRejected,
-} from "../domain/events/wager-transaction-events";
-import { WalletBalanceChanged } from "../domain/events/wallet-balance-changed";
 import { BusinessFailureCode, type FailureCode } from "../domain/failure-codes";
 import { InboxMessage } from "../domain/inbox-message";
 import type { Money } from "../domain/money";
-import { OutboxMessage } from "../domain/outbox-message";
 import { payloadHash } from "../domain/payload-hash";
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../domain/wager-transaction";
 import type { Wallet } from "../domain/wallet";
@@ -24,6 +16,9 @@ import { type FaultInjector, FaultPoint, NO_FAULTS } from "./ports/fault-injecto
 import type { IdGenerator } from "./ports/id-generator";
 import type { TransactionalRepositories, UnitOfWork } from "./ports/unit-of-work";
 import { decideWager } from "./wager-rules";
+import { resolveEagerly } from "./resolve-pending-references";
+import { settleWager } from "./settle-wager";
+export { REFERENCE_FIRST_RETRY_MS } from "./settle-wager";
 
 /** O que o provedor submete — igual por HTTP e por SQS (§10: mesmo use case). */
 export interface WagerCommand {
@@ -61,9 +56,6 @@ export interface QueueDelivery {
   readonly consumerName: string;
   readonly messageId: string;
 }
-
-/** Primeira nova tentativa de resolver uma referência ausente (D8: 5 s · 2^n, teto 5 min). */
-export const REFERENCE_FIRST_RETRY_MS = 5_000;
 
 /** Nova leitura após perder a corrida de um 23505 (D4): 1 basta; 3 é folga, não laço. */
 const MAX_ATTEMPTS = 3;
@@ -198,7 +190,7 @@ export class ProcessWagerTransaction {
     build: (at: Date) => WagerTransaction,
     wallet: Wallet | undefined,
   ): Promise<{ result: WagerResult; wrote: boolean }> {
-    const { wallets, transactions, ledger, outbox } = repositories;
+    const { transactions } = repositories;
 
     // 3. idempotência persistente
     const existing = await transactions.findByIdempotencyKey(command.idempotencyKey);
@@ -228,38 +220,10 @@ export class ProcessWagerTransaction {
       reference !== undefined && tx.requiresReference() ? await transactions.hasProcessedReversal(reference.id) : false;
     const decision = decideWager({ wallet, transaction: tx, reference, referenceAlreadyReversed });
 
-    const ctx = () => ({ eventId: this.ids.next(), correlationId: command.correlationId, occurredAt: at });
-    const events: IntegrationEvent<unknown>[] = [];
-    switch (decision.outcome) {
-      case "APPLY": {
-        const entry = wallet.apply(decision.direction, { entryId: this.ids.next(), transactionId: tx.id, money: tx.money, at });
-        tx.markProcessed({ resultBalance: wallet.balance, at, referenceTransactionId: decision.referenceTransactionId });
-        await transactions.insert(tx);
-        await wallets.saveMovement(wallet, entry);
-        await ledger.append(entry);
-        events.push(WagerTransactionProcessed.from(tx, ctx()), WalletBalanceChanged.from(wallet, entry, ctx()));
-        break;
-      }
-      case "RECORD":
-        tx.markProcessed({ resultBalance: wallet.balance, at, referenceTransactionId: decision.referenceTransactionId });
-        await transactions.insert(tx);
-        events.push(WagerTransactionProcessed.from(tx, ctx()));
-        break;
-      case "REJECT":
-        tx.reject(decision.failureCode, { resultBalance: wallet.balance, at });
-        await transactions.insert(tx);
-        events.push(WagerTransactionRejected.from(tx, ctx()));
-        break;
-      case "WAIT_REFERENCE":
-        tx.markPendingReference(new Date(at.getTime() + REFERENCE_FIRST_RETRY_MS));
-        await transactions.insert(tx);
-        events.push(WagerTransactionPendingReference.from(tx, ctx()));
-        break;
-    }
-
-    // 5. outbox no mesmo commit
-    for (const event of events) await outbox.add(OutboxMessage.enqueue(event));
-    return { result: resultOf(tx, false), wrote: true };
+    await settleWager(repositories, wallet, tx, decision, at, this.ids);
+    const result = resultOf(tx, false);
+    if (tx.isTerminal()) await resolveEagerly(repositories, wallet, tx, at, this.ids);
+    return { result, wrote: true };
   }
 
   private receiveInbox(delivery: QueueDelivery, hash: string): InboxMessage {

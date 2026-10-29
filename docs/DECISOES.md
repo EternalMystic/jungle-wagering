@@ -4,6 +4,46 @@ Cada item: decisão · por quê · alternativa descartada. O README exige que "q
 interpretação adicional" seja documentada — as marcadas com **[interpretação]** são
 pontos em que o enunciado é ambíguo e a banca provavelmente vai perguntar.
 
+## D22. Publisher e resolução de pendências (fase 07) [autopilot]
+
+- `SqlBackgroundStore`: claim da outbox em transação curta com `SKIP LOCKED`, lote 50,
+  lease de 30 s e `locked_by = INSTANCE_ID` (fallback UUID por processo). Renova cada
+  evento antes do envio; renovação e conclusão condicionadas a id, dono, vencimento
+  original e lease ainda vigente. Datas do token são truncadas a milissegundos no SQL,
+  preservando a comparação exata com `Date` do JS. Um dono atrasado não marca o lease
+  que outro publisher assumiu. Após sucesso os campos de lease permanecem (D20).
+- SQS recebe somente o envelope persistido; grupo = wallet, dedupe = eventId. Toda
+  chamada SQS acontece depois de fechar a transação de claim/renovação. Envio tem prazo
+  de 10 s, menor que o lease; falha persiste backoff do domínio, libera lease e grava
+  `SQS_PUBLISH_FAILED`, sem copiar erro do SDK que possa conter payload financeiro.
+  Evento nunca é descartado. Os dois checkpoints de crash da outbox estão ligados.
+- `GET /metrics` expõe `outbox_lag_seconds` como gauge no formato Prometheus, calculado
+  diretamente sobre a outbox confirmada, inclusive eventos em backoff/lease. Esta fase
+  implementa somente a métrica de lag; a consolidação da observabilidade continua em S9.
+- O schema congelado não tem colunas de lease para pendências: o claim usa
+  `next_reference_attempt_at = agora + 30 s` como reserva recuperável. `SKIP LOCKED`
+  impede esperar por itens já reivindicados. Essa transação NÃO toma lock de wallet.
+  Ela termina antes do processamento, que sempre trava wallet → transação e relê
+  status/token. Claim velho não consome tentativa nem reprocessa resultado terminal.
+- D8: 5 s iniciais; falhas de resolução reagendam 10/20/40/80/160/300/300 s; a oitava
+  tentativa sem referência rejeita com `REFERENCE_NOT_FOUND` e evento. TTL adicional
+  de 915 s desde a criação evita espera ilimitada após crashes de reivindicadores.
+  **[interpretação]** limite/TTL só rejeita quando a referência continua ausente ou
+  não terminal; uma referência válida já disponível é aplicada e validada normalmente.
+- `settleWager` compartilha a aplicação de decisões entre entrada HTTP/SQS e resolução:
+  transição, UPDATE condicionado, ledger e eventos ficam no mesmo commit. Resolução
+  ansiosa percorre dependências da mesma wallet em lotes de leitura de 50, sem limite
+  total artificial, incluindo cascatas de referências rejeitadas. Sob a wallet já
+  travada, espera por locks curtos de claim em vez de pular uma pendência. Nunca toma
+  a wallet após travar transações. A resposta da referência preserva seu próprio saldo
+  original, mesmo que outras operações mudem a wallet no mesmo commit.
+- Os laços de publisher e pendências são independentes; cada processo os inicia no
+  bootstrap e os encerra antes de fechar pool/SQS. Poll de 250 ms é agendamento de
+  produção, não espera acrescentada a testes de concorrência.
+- Verificação desta sessão limitada pelo ambiente: Docker/`Bun.spawn`, criação de
+  worktree e, intermitentemente, o próprio PowerShell negaram acesso. Não contornar esses bloqueios
+  substituindo processos reais ou retirando proteções; `/prove-red` continua pendente.
+
 ---
 
 ## D1. ORM: MikroORM (preferencial)

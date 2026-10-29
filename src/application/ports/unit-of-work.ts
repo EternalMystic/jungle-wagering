@@ -24,6 +24,11 @@ export interface WalletRepository {
 }
 
 export interface WagerTransactionRepository {
+  /** Somente depois do lock da wallet. */
+  lockById(transactionId: string): Promise<WagerTransaction | undefined>;
+  findPendingReferencing(walletId: string, providerId: string, externalId: string, limit: number): Promise<WagerTransaction[]>;
+  /** Atualiza somente uma PENDING_REFERENCE, nunca os campos de negócio. */
+  savePending(transaction: WagerTransaction): Promise<void>;
   findById(transactionId: string): Promise<WagerTransaction | undefined>;
   findByIdempotencyKey(idempotencyKey: string): Promise<WagerTransaction | undefined>;
   findByProviderExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined>;

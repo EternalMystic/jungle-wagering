@@ -5,11 +5,80 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 06 — Consumer SQS + inbox (implementada; portão desta sessão NÃO passou, bloqueios abaixo)
+- Fase atual: 07 — Outbox publisher + worker de pendências (componentes verdes; portão BLOQUEADO por permissões do ambiente)
 - Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3), 05 (364aeb7)
 - Sabotagens comprovadas (`/prove-red`): linhas 2, 3 e 11 (abaixo)
 
-## Revalidação da fase 06 — 2026-10-29 (sessão atual)
+## Fase 07 — sessão de 2026-10-29 [autopilot]
+
+- Implementados publisher D10/D20, lease com fencing por dono/vencimento, claim com
+  `SKIP LOCKED`, renovação antes do SQS, backoff persistente sem descarte, checkpoints
+  `after-claim-before-publish`/`after-publish-before-mark` e gauge `outbox_lag_seconds`
+  em `GET /metrics`. `INSTANCE_ID` configurável; dono preservado após publicação.
+- Implementados `ResolvePendingReferences`, claim recuperável sem mudança de schema,
+  backoff/8 tentativas/TTL de 915 s, ordem wallet → transação, releitura de status/token,
+  resolução ansiosa e de cadeias no commit da referência. `settleWager` compartilha
+  escritas/eventos e conserva o resultado original da referência. Detalhes em D22.
+- Teste novo `test/integration/background-workers.test.ts`: PostgreSQL e SQS reais,
+  migrations de produção num banco descartável; todos os casos terminam conferindo I1–I8.
+  Cobre resolução ansiosa, backoff/TTL, publicação/lag, disputa de claims, fencing,
+  falha de envio, invisibilidade antes do commit, recuperação após interrupção do envio,
+  reversões concorrentes, cadeias, rollback conjunto, limite de tentativas e escopo.
+  Inclui execução dos dois laços agendados e shutdown. Esses testes complementam os
+  processos reais de `test/concurrency`; não os substituem.
+- TDD mostrado para os três casos iniciais: VERMELHO (`Cannot find module
+  .../resolve-pending-references`), depois VERDE: **3 pass / 0 fail / 19 expect**.
+  Unit do use case: **30 pass / 0 fail / 97 expect**. Revalidação final dos componentes:
+  **11 pass / 0 fail / 78 expect**, invariantes vazias; `typecheck` e `lint` verdes
+  (99 arquivos), incluindo todas as alterações de produção e testes desta fase.
+- Na execução ampliada inicial, dois erros de preparação dos testes novos foram
+  corrigidos: expiração de lease
+  somente em linhas que têm dono (respeitando `ck_outbox_lease`) e não bloquear a
+  barreira do teste de transação aberta com um matcher `.rejects` antes de liberá-la.
+  Timeouts e asserções não foram afrouxados. A correção da barreira e os casos finais
+  de tentativas/escopo foram reexecutados e passaram; nenhuma proteção foi retirada.
+- Nenhum commit, nenhum arquivo em `test/acceptance/**`, `reference/**` ou
+  `docs/CHALLENGE.md` alterado. `git diff --check` limpo e diff vazio nos caminhos
+  congelados. Varredura suplementar com `Bun.Glob` + `checkText`: 94 arquivos de src/test,
+  zero violações; não substitui o scan oficial. Os processos dos dois testes iniciais
+  presos na barreira foram identificados por PID/horário e encerrados, sem tocar no
+  processo anterior do autopilot.
+
+### Portão executado/tentado nesta sessão
+
+| Comando | Saída / resultado observado |
+|---|---|
+| `docker compose up -d --wait` | exit 1: `permission denied ... dockerDesktopLinuxEngine`. |
+| `bun run scripts/scan-forbidden.ts` | exit 1: `EPERM ... uv_spawn 'git'`. |
+| `bun run typecheck` | VERDE: `tsc --noEmit -p tsconfig.json`, exit 0. |
+| `bun run test:unit` | **280 pass / 1 fail**: FaultInjector não consegue criar subprocesso, `EPERM ... uv_spawn bun.exe`. |
+| `bun run test:acceptance` | **0 pass / 2 fail**: setup não consegue iniciar migration em subprocesso (`EPERM`). O hash do template mudou com a persistência. |
+| `bun run test:integration` | **26 pass / 2 fail / 135 expect**: os 11 casos novos passaram; setups consumer/HTTP bloqueados por `EPERM` na migration em subprocesso. |
+| `for i in 1 2 3; do bun run test:concurrency || exit 1; done` | Equivalente PowerShell executado: **0 pass / 6 fail** no setup (`EPERM ... uv_spawn bun.exe`), exit 1 na primeira rodada, como exigido. Não houve três execuções verdes. |
+| Extra: `bun run lint` | VERDE: `Checked 99 files ... No fixes applied.`, exit 0. |
+
+- O terminal também teve bloqueios intermitentes `CreateProcessAsUserW failed: 5`;
+  voltou a funcionar e permitiu executar o portão acima, mas as restrições a Docker,
+  subprocessos Bun/Git e escrita em `.git` persistiram.
+
+### `/prove-red` — linhas 11, 12, 14, 15 e 17
+
+- Lido `.claude/commands/prove-red.md`. Tentativa de worktree dentro do workspace:
+  `git -c safe.directory=C:/Users/nobuyasu/jungle-kit worktree add .scratch/prove-red-tmp -b prove-red-tmp HEAD`.
+- Saída: `fatal: cannot lock ref 'refs/heads/prove-red-tmp': Unable to create
+  '.../.git/refs/heads/prove-red-tmp.lock': Permission denied` (exit 1).
+- Nenhuma sabotagem aplicada à árvore principal; **as cinco provas continuam pendentes
+  nesta sessão**, pois a preparação isolada falhou. O relato histórico da linha 11 não
+  é uma nova comprovação. Erro de infraestrutura não é VERMELHO pelo motivo correto.
+
+### Próxima ação da fase 07
+
+- Reexecutar typecheck/lint, suíte nova completa e TODOS os comandos do portão num
+  ambiente que permita PowerShell, Docker e subprocessos Bun; corrigir qualquer falha
+  real antes de aprovar. Reexecutar `/prove-red` das cinco linhas com worktree gravável.
+  Não avançar para fases futuras. O portão desta fase permanece **NÃO APROVADO**.
+
+## Revalidação da fase 06 — 2026-10-29 (histórico anterior à fase 07)
 
 - Revisados consumer, parser/classificação, lifecycle, inbox/use case e repositórios; nenhuma
   fase posterior iniciada. Nenhum commit e nenhum arquivo congelado alterado.

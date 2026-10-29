@@ -18,13 +18,17 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
   ) {}
 
   async run<T>(work: (repositories: TransactionalRepositories) => Promise<T>): Promise<T> {
+    return this.withSql((sql) => work(sqlRepositories(sql)));
+  }
+
+  async withSql<T>(work: (sql: SqlSession) => Promise<T>): Promise<T> {
     try {
       return await this.orm.em.fork().transactional(async (em) => {
         const trx = em.getTransactionContext<Knex.Transaction>();
         if (trx === undefined) throw new Error("em.transactional did not open a transaction context");
         const sql = new SqlSession(trx);
         await sql.query("SELECT set_config('lock_timeout', ?, true)", [`${this.lockTimeoutMs}ms`]);
-        return work(sqlRepositories(sql));
+        return work(sql);
       });
     } catch (error) {
       if (error instanceof ApplicationError) throw error;

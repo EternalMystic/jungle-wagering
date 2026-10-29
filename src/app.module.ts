@@ -12,10 +12,14 @@ import { OpenWallet } from "./application/open-wallet";
 import type { FaultInjector } from "./application/ports/fault-injector";
 import type { UnitOfWork } from "./application/ports/unit-of-work";
 import { ProcessWagerTransaction } from "./application/process-wager-transaction";
+import { ResolvePendingReferences } from "./application/resolve-pending-references";
 import { WageringQueries } from "./application/wagering-queries";
 import type { AppConfig } from "./infrastructure/config/app-config";
 import { PostgresReadinessProbe, SqsReadinessProbe } from "./infrastructure/health/readiness-probes";
 import { MikroOrmUnitOfWork } from "./infrastructure/persistence/mikro-orm-unit-of-work";
+import { SqlBackgroundStore } from "./infrastructure/persistence/sql-background-store";
+import { BackgroundWorkers } from "./infrastructure/workers/background-workers";
+import { OUTBOX_METRICS, OutboxMetricsController } from "./interface/http/outbox-metrics.controller";
 import type { Orm } from "./infrastructure/persistence/orm";
 import { initOrm } from "./infrastructure/persistence/orm";
 import { createFaultInjector } from "./infrastructure/faults/process-kill-fault-injector";
@@ -41,6 +45,7 @@ export const SQS_CLIENT = Symbol("SQS_CLIENT");
 export const UNIT_OF_WORK = Symbol("UNIT_OF_WORK");
 export const CLOCK = Symbol("CLOCK");
 export const WAGER_CONSUMER = Symbol("WAGER_CONSUMER");
+export const BACKGROUND_WORKERS = Symbol("BACKGROUND_WORKERS");
 
 // Tipos estruturais locais: o metadata do decorator vira `Object`, sem referenciar
 // classes importadas só como tipo (o transpiler do Bun não as tem em runtime).
@@ -94,12 +99,19 @@ class WagerConsumerLifecycle implements OnApplicationBootstrap, BeforeApplicatio
   }
 }
 
+@Injectable()
+class BackgroundLifecycle implements OnApplicationBootstrap, BeforeApplicationShutdown {
+  constructor(@Inject(BACKGROUND_WORKERS) private readonly workers: StartStop) {}
+  onApplicationBootstrap(): void { this.workers.start(); }
+  async beforeApplicationShutdown(): Promise<void> { await this.workers.stop(); }
+}
+
 @Module({})
 export class AppModule {
   static forRoot(config: AppConfig): DynamicModule {
     return {
       module: AppModule,
-      controllers: [HealthController, WalletsController, WageringController],
+      controllers: [HealthController, WalletsController, WageringController, OutboxMetricsController],
       providers: [
         { provide: APP_CONFIG, useValue: config },
         { provide: ORM, useFactory: () => initOrm(config) },
@@ -114,6 +126,7 @@ export class AppModule {
           ],
         },
         { provide: UNIT_OF_WORK, inject: [ORM], useFactory: (orm: Orm) => new MikroOrmUnitOfWork(orm, config.lockTimeoutMs) },
+        { provide: OUTBOX_METRICS, inject: [UNIT_OF_WORK], useFactory: (uow: MikroOrmUnitOfWork) => new SqlBackgroundStore(uow) },
         { provide: CLOCK, useValue: new SystemClock() },
         { provide: ID_GENERATOR, useValue: new UuidV7Generator() },
         { provide: FAULT_INJECTOR, useValue: createFaultInjector(config.nodeEnv, config.faultPoint) },
@@ -143,8 +156,16 @@ export class AppModule {
               generateId: () => ids.next(),
             }),
         },
+        {
+          provide: BACKGROUND_WORKERS,
+          inject: [OUTBOX_METRICS, UNIT_OF_WORK, CLOCK, ID_GENERATOR, SQS_CLIENT, FAULT_INJECTOR],
+          useFactory: (store: SqlBackgroundStore, uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator, sqs: SQSClient, faults: FaultInjector) =>
+            new BackgroundWorkers(store, new ResolvePendingReferences(uow, clock, ids), sqs,
+              config.queues.walletEvents, config.instanceId, faults, new JsonLogger("background-workers")),
+        },
         InfrastructureLifecycle,
         WagerConsumerLifecycle,
+        BackgroundLifecycle,
       ],
     };
   }

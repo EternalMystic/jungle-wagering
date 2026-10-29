@@ -82,6 +82,31 @@ class SqlWalletRepository implements WalletRepository {
 class SqlWagerTransactionRepository implements WagerTransactionRepository {
   constructor(private readonly sql: SqlSession) {}
 
+  async lockById(id: string): Promise<WagerTransaction | undefined> {
+    return this.one(`${TRANSACTION_SELECT} WHERE t.id = ? FOR UPDATE OF t`, [id]);
+  }
+
+  async findPendingReferencing(walletId: string, providerId: string, externalId: string, limit: number): Promise<WagerTransaction[]> {
+    const { rows } = await this.sql.query<WagerTransactionRecord>(
+      `${TRANSACTION_SELECT} WHERE t.wallet_id = ? AND t.provider_id = ?
+         AND t.reference_external_transaction_id = ? AND t.status = 'PENDING_REFERENCE'
+       ORDER BY t.created_at, t.id LIMIT ? FOR UPDATE OF t`,
+      [walletId, providerId, externalId, limit],
+    );
+    return rows.map(transactionFromRecord);
+  }
+
+  async savePending(tx: WagerTransaction): Promise<void> {
+    const { rowCount } = await this.sql.query(
+      `UPDATE wager_transactions SET status = ?, failure_code = ?, reference_transaction_id = ?,
+         result_balance_amount = ?::numeric(20,2), reference_attempts = ?, next_reference_attempt_at = ?, resolved_at = ?
+       WHERE id = ? AND status = 'PENDING_REFERENCE'`,
+      [tx.status, tx.failureCode ?? null, tx.referenceTransactionId ?? null, tx.resultBalance?.toString() ?? null,
+        tx.referenceAttempts, tx.nextReferenceAttemptAt ?? null, tx.resolvedAt ?? null, tx.id],
+    );
+    if (rowCount !== 1) throw new Error(`pending transaction ${tx.id}: update matched ${rowCount} rows`);
+  }
+
   findById(transactionId: string): Promise<WagerTransaction | undefined> {
     return this.one(`${TRANSACTION_SELECT} WHERE t.id = ?`, [transactionId]);
   }
