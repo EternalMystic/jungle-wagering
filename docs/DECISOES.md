@@ -4,6 +4,33 @@ Cada item: decisão · por quê · alternativa descartada. O README exige que "q
 interpretação adicional" seja documentada — as marcadas com **[interpretação]** são
 pontos em que o enunciado é ambíguo e a banca provavelmente vai perguntar.
 
+## D23. Correções da auditoria (fase 08) [autopilot]
+
+- **[interpretação]** Crédito cujo saldo resultante excederia `NUMERIC(20,2)` é
+  rejeição de negócio `BALANCE_LIMIT_EXCEEDED`. A capacidade é verificada em centavos
+  bigint, depois de validar moeda/player/referência e antes de qualquer movimento.
+  Não arredondar, truncar, saturar ou ampliar o schema. O limite exato continua válido.
+  Rejeição congela o saldo observado, grava inbox/outbox no mesmo commit e permite
+  replay original. A mesma decisão atende HTTP, SQS, worker e resolução ansiosa:
+  uma WIN pendente inválida não pode desfazer a BET válida que disponibilizou a referência.
+- Erros nos logs e no atributo `detail` da DLQ carregam apenas código de aplicação/
+  domínio, SQLSTATE de cinco caracteres ou `UNEXPECTED_ERROR`. Mensagem, stack,
+  cause, detail e conversão textual de objetos arbitrários não são seguros: o driver
+  PostgreSQL pode incluir o JSON financeiro na mensagem (comprovado com erro `22P02`).
+  O filtro HTTP usa o logger JSON existente. A consolidação pino/métricas permanece
+  na fase prevista; esta correção somente elimina o vazamento nos caminhos existentes.
+- Correção da promessa de D18: `aggregateId = walletId` conserva o agrupamento FIFO,
+  mas publishers concorrentes **não garantem ordem de commit**: `UPDATE RETURNING`
+  não tem ordem definida e um lease/backoff anterior não bloqueia eventos posteriores.
+  O contrato é at-least-once por `eventId`, como §11. Consumidores de projeção de saldo
+  devem deduplicar por `eventId` e avançar somente para `walletVersion` maior; operações
+  que precisem da sequência completa devem detectar lacunas e reconciliar. Não confiar
+  na ordem de entrega para aplicar débitos/créditos. Não introduzido lock global nem
+  serialização de todas as wallets para cumprir uma promessa adicional à especificação.
+- Hipótese de regex aceitar LF final foi descartada: padrões sem flag `m` rejeitam
+  `"1.00\n"`/`"BRL\n"` no Bun usado, e já existe teste de amount com LF. Sem alteração
+  de regex ou relaxamento de validação. Evidências e limites em `AUDITORIA.md`.
+
 ## D22. Publisher e resolução de pendências (fase 07) [autopilot]
 
 - `SqlBackgroundStore`: claim da outbox em transação curta com `SKIP LOCKED`, lote 50,
@@ -303,7 +330,8 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   o use case consulta `canDebit` antes e escolhe `INSUFFICIENT_FUNDS` ×
   `REVERSAL_INSUFFICIENT_FUNDS`.
 - **Eventos**: `aggregateId = walletId` para TODOS (inclusive os de transação): todos os
-  eventos de uma wallet caem no mesmo `MessageGroupId` e chegam ordenados. Campos ausentes
+  eventos de uma wallet caem no mesmo `MessageGroupId`; ordem de commit não é garantida
+  entre publishers (correção da auditoria, D23). Campos ausentes
   em `data` são `null` (schema JSON estável); `data` é congelado. `WalletBalanceChanged.from`
   exige que o lançamento seja o último movimento da wallet.
 - **Outbox backoff**: `min(1 s · 2^(attempts−1), 5 min)`, sem limite de tentativas — evento

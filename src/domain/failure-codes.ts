@@ -6,6 +6,7 @@ export const BusinessFailureCode = {
   InsufficientFunds: "INSUFFICIENT_FUNDS",
   /** distinto de INSUFFICIENT_FUNDS (§7.9): reversão que deixaria saldo negativo */
   ReversalInsufficientFunds: "REVERSAL_INSUFFICIENT_FUNDS",
+  BalanceLimitExceeded: "BALANCE_LIMIT_EXCEEDED",
   CurrencyMismatch: "CURRENCY_MISMATCH",
   /** única rejeição NÃO persistida: não há wallet dona para a FK (D6) */
   WalletNotFound: "WALLET_NOT_FOUND",

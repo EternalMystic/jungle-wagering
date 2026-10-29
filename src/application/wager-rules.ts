@@ -61,6 +61,9 @@ export function decideWager(input: DecideWagerInput): WagerDecision {
   if (!tx.affectsBalance()) return { outcome: "RECORD", ...linked };
 
   const direction = tx.ledgerDirectionFor(reference);
+  if (direction === LedgerDirection.Credit && !wallet.balance.canAdd(tx.money)) {
+    return reject(BusinessFailureCode.BalanceLimitExceeded);
+  }
   if (direction === LedgerDirection.Debit && !wallet.canDebit(tx.money)) {
     // §7.9: reversão sem saldo é operacionalmente diferente de aposta sem saldo
     return reject(

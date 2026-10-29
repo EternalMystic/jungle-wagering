@@ -1,3 +1,6 @@
+import { ApplicationError } from "../../application/errors";
+import { DomainError } from "../../domain/errors";
+
 /**
  * Log estruturado mínimo (uma linha JSON por evento) até o pino entrar (D12 / PLANO S9).
  * Campos de contexto: `correlationId, messageId, transactionId, walletId, providerId` —
@@ -32,5 +35,10 @@ export class JsonLogger implements Logger {
 }
 
 export function errorText(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  if (error instanceof ApplicationError || error instanceof DomainError) return error.code;
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code: unknown = error.code;
+    if (typeof code === "string" && code.length === 5 && /^[0-9A-Z]{5}$/.test(code)) return `DATABASE_ERROR:${code}`;
+  }
+  return "UNEXPECTED_ERROR";
 }

@@ -39,6 +39,8 @@ Legenda de teste: `A` = test/acceptance (congelado) · `I` = integration · `C` 
 | 28 | Reconciliação não corrige em silêncio (§9) | endpoint lê, loga, métrica | I `divergence reported` (diverge via SQL com trigger desabilitado em teste) | — |
 | 29 | Migrations reversíveis (§4) | `up`/`down` | I `migrations round-trip` | — |
 | 30 | Testes sem mock de PG/SQS (§14) | lint + hook | revisão do `test-skeptic` | — |
+| 31 | Crédito não ultrapassa capacidade sem bloquear pendências (§6.1, §7.1; D23) | `Money.canAdd` bigint + `decideWager` → `BALANCE_LIMIT_EXCEEDED`, mesmo commit | I `audit-regressions` › imediato/inbox/replay, ansioso, worker, teto exato | VERMELHO antes da proteção: 3 caminhos lançavam `InvalidMoneyError`; VERDE depois; `/prove-red` isolado pendente |
+| 32 | Logs não carregam payload financeiro (§12; D23) | `errorText` só códigos + filtro HTTP JSON | U `error-logging`; I `audit-regressions` › erro PostgreSQL real com sentinela | VERMELHO antes da proteção: diagnóstico ecoava JSON financeiro (`22P02`); VERDE depois; `/prove-red` isolado pendente |
 
 ## Invariante final de todo teste
 

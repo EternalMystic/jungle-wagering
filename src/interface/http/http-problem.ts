@@ -4,8 +4,8 @@ import {
   type ExceptionFilter,
   HttpException,
   HttpStatus,
-  Logger,
 } from "@nestjs/common";
+import { JsonLogger, errorText } from "../../infrastructure/logging/json-logger";
 import {
   IdempotencyConflictError,
   InvalidCommandError,
@@ -78,12 +78,12 @@ export function mapError(exception: unknown): Mapped {
 
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
-  private readonly logger = new Logger("http");
+  private readonly logger = new JsonLogger("http");
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const mapped = mapError(exception);
     if (mapped.status >= 500 && mapped.status !== 503) {
-      this.logger.error(exception instanceof Error ? (exception.stack ?? exception.message) : String(exception));
+      this.logger.error("unexpected HTTP error", { error: errorText(exception) });
     }
     const res = host.switchToHttp().getResponse<HttpResponse>();
     if (mapped.retryAfter !== undefined) res.setHeader("Retry-After", String(mapped.retryAfter));

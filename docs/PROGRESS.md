@@ -5,9 +5,66 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 07 — Outbox publisher + worker de pendências (componentes verdes; portão BLOQUEADO por permissões do ambiente)
+- Fase atual: 08 — Auditoria e correção (duas ALTA corrigidas; portão BLOQUEADO por permissões do ambiente)
 - Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3), 05 (364aeb7)
 - Sabotagens comprovadas (`/prove-red`): linhas 2, 3 e 11 (abaixo)
+
+## Fase 08 — sessão de 2026-10-29 [autopilot]
+
+- Executados em ordem os subagentes `invariant_auditor` e `test_skeptic`, seguindo os
+  arquivos em `.claude/agents/`. Achados, severidades, revisão por arquivo, cobertura
+  da §13, cinco sabotagens avaliadas por leitura e limitações em `docs/AUDITORIA.md`.
+  Nenhuma ELIMINATÓRIA nova confirmada; ambas ALTA corrigidas e revisadas novamente
+  pelo auditor. Não avançadas funcionalidades da fase 09.
+- Correção A01: crédito além de NUMERIC(20,2) agora é REJECTED/BALANCE_LIMIT_EXCEEDED
+  antes da movimentação, por comparação bigint (`Money.canAdd` + `decideWager`). Evita
+  que WIN pendente desfaça BET válida na resolução ansiosa ou fique repetindo para
+  sempre no worker. Limite exato aceito; rejeição, resultado original, inbox e outbox
+  preservados no mesmo commit. Código estável documentado em D23 [autopilot].
+- Correção A02: logs e `detail` da DLQ não copiam mensagens/stacks arbitrários.
+  `errorText` permite códigos conhecidos/SQLSTATE ou UNEXPECTED_ERROR; filtro HTTP
+  passa a usar JSON sanitizado. Erro PG real 22P02 comprovou que a mensagem original
+  continha JSON financeiro; teste exige diagnóstico sem ele. D23 também corrige a
+  promessa indevida de ordenação de commit da outbox: agrupamento FIFO não a garante.
+- Regressões novas: `test/integration/audit-regressions.test.ts` (5 casos, PostgreSQL
+  real, todos com I1–I8) e `test/unit/error-logging.test.ts` (2 casos). TDD inicial
+  **1 pass / 6 fail / 15 expect** pelos defeitos auditados; após correções **7 pass /
+  0 fail / 44 expect**. Helper novo de eventos foi corrigido para exigir também o
+  PendingReference anterior conforme §11, preservando igualdade do histórico completo.
+  Nenhum teste preexistente ou caminho congelado alterado.
+- Pendentes MÉDIAS/BAIXAS: prova distribuída de sobreposição de claims; cobertura
+  específica do worker aplicando referência disponível; pool menor que a largada
+  total em dois testes; invariantes ausentes em alguns casos de infraestrutura/400;
+  Date mutável e limpeza parcial do harness. Detalhes e evidências em AUDITORIA.
+  Hipótese de regex aceitar LF descartada por execução e teste já existente.
+- `/prove-red` tentado em `.scratch/prove-red-phase08`: não cria ref/lock em `.git`
+  (`Permission denied`). Nenhuma sabotagem na árvore principal. Linhas 31/32 novas
+  da matriz têm vermelho/verde natural, mas a sabotagem isolada continua pendente;
+  provas históricas não contam como nova execução.
+
+### Portão final da fase 08 — saídas observadas
+
+| Comando | Resultado |
+|---|---|
+| `docker compose up -d --wait` | exit 1: `permission denied ... dockerDesktopLinuxEngine`. |
+| `bun run scripts/scan-forbidden.ts` | exit 1: `EPERM ... uv_spawn 'git'`. |
+| `bun run typecheck` | exit 0: `bun install` sem mudanças + `tsc --noEmit -p tsconfig.json`. |
+| `bun run test:unit` | **282 pass / 1 fail / 564 expect**; exit 1 exclusivamente pelo subprocesso do FaultInjector (`EPERM ... bun.exe`). |
+| `bun run verify:schema` | exit 0: **TUDO OK**, ataques/corridas e I1–I8 vazias. |
+| `bun run test:acceptance` | **22 pass / 1 fail / 90 expect**; exit 1 no setup HTTP, Bun.spawn EPERM. |
+| `bun run test:integration` | **31 pass / 2 fail / 167 expect**; exit 1 nos setups consumer/API, Bun.spawn EPERM. Os novos casos, os 11 de workers e catálogo da migration passaram. |
+| `for i in 1 2 3; do bun run test:concurrency || exit 1; done` | Equivalente PowerShell: **0 pass / 10 fail** na primeira rodada, Bun.spawn EPERM; exit 1 interrompeu o laço, sem rodadas 2/3. |
+| `test -s docs/AUDITORIA.md` | Git Bash não iniciou o builtin (`CreateFileMapping ... Win32 error 5`, exit 256). Equivalente PowerShell verificou arquivo não vazio, exit 0. |
+| Extra: `bun run lint` | exit 0: **101 arquivos**, nenhuma correção aplicada. |
+| Extra: scan via Bun.Glob + checkText | exit 0: **96 arquivos src/test, zero violações**; não substitui scan oficial. |
+
+- Saídas completas locais dos comandos principais: `.scratch/phase08-gate/*.log`.
+  `git diff --check` limpo; diff vazio em `test/acceptance/**`, `reference/**` e
+  `docs/CHALLENGE.md`. Nenhum commit feito.
+- Próxima ação desta fase: reexecutar o portão completo e `/prove-red` com acesso ao
+  Docker/criação de subprocessos/escrita de refs para worktree; corrigir falhas reais
+  que então surgirem. **Fase 08 não aprovada nesta sessão**; não declarar verde nem
+  substituir os testes distribuídos pelos componentes que passaram.
 
 ## Fase 07 — sessão de 2026-10-29 [autopilot]
 

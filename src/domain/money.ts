@@ -48,6 +48,12 @@ export class Money {
     return Money.bounded(this.cents + other.cents, this.currency);
   }
 
+  canAdd(other: Money): boolean {
+    this.assertSameCurrency(other);
+    const sum = this.cents + other.cents;
+    return sum <= MAX_ABS_CENTS && sum >= -MAX_ABS_CENTS;
+  }
+
   subtract(other: Money): Money {
     this.assertSameCurrency(other);
     return Money.bounded(this.cents - other.cents, this.currency);
