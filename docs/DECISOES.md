@@ -263,6 +263,20 @@ dono para a FK); responde 422 e, na fila, faz ack. Documentar.
 - Falha: `scheduleRetry` (attempts++, backoff), `last_error`.
 - Métrica `outbox_lag_seconds = now() − min(occurred_at) WHERE published_at IS NULL`.
 
+## D25. Escopo da documentação final (fase 10) [autopilot]
+
+- README e ARCHITECTURE descrevem o código atual e as limitações da auditoria,
+  sem tratar propostas anteriores como implementadas: SQL explícito via MikroORM
+  substitui EntitySchema (D19); a saída não tem ordem de commit (D23); IdP é desenho,
+  não autenticação efetiva (D24). Não alterados schema, domínio ou testes nesta fase.
+- **[interpretação]** Apenas validar token não autoriza consultas sem providerId na
+  rota. O desenho futuro exige política de acesso a wallet/transação e escopos,
+  além da comparação de providerId já existente; não se presume propriedade da
+  wallet a partir do token. Essa lacuna fica explícita, sem implementar nova fase.
+- Portões antigos bloqueados e sabotagens pendentes continuam como pendências.
+  Resultados da fase 10 são registrados pela execução efetiva em PROGRESS.md;
+  documentação não converte teste não executado em prova concluída.
+
 ## D11. Autenticação
 
 **Não implementada** (não pontua, §2). `AuthGuard` no-op atrás de um `ProviderIdentityPort`;

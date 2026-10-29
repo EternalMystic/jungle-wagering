@@ -5,9 +5,53 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 09 — Observabilidade, reconciliação e consultas implementadas; portão BLOQUEADO por permissões do ambiente
+- Fase atual: 10 — Documentação escrita; portão BLOQUEADO por permissões do ambiente
 - Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3), 05 (364aeb7)
 - Sabotagens comprovadas (`/prove-red`): linhas 2, 3 e 11 (abaixo)
+
+## Fase 10 — sessão de 2026-10-29 [autopilot]
+
+- README reescrito: pré-requisitos, Compose real (PostgreSQL 16 + MiniStack), filas,
+  setup, variáveis conferidas no código, migrations up/down, rotas, formato monetário,
+  cada comando de teste e seu alcance, portão e equivalentes PowerShell.
+- ARCHITECTURE criado a partir de DECISOES/INVARIANTES/AUDITORIA e conferência do
+  código: fronteiras, SQL explícito via MikroORM (sem EntitySchema), Money, ledger,
+  locks/transação, hash/replay, interpretações, códigos, inbox/outbox, leases/fencing,
+  TTL/referências, paginação/reconciliação, observabilidade e autenticação proposta.
+  Explicita ausência de ordem de commit dos eventos, no-op de identidade, limites
+  A04/T01–T06, sabotagens pendentes e prioridades com mais tempo.
+- D25 [autopilot]: documentação reflete implementação e pendências; desenho de
+  autenticação exige autorização por recurso/escopo além de token/providerId.
+  Nenhuma implementação de fase futura, schema, código de produção ou teste alterado.
+  Não houve commit, conforme instrução do orquestrador.
+
+### Portão final da fase 10 — saídas observadas
+
+Todos os comandos foram executados/tentados nesta sessão. Saídas completas em
+`.scratch/phase10-gate/*.log` (ignoradas); cache Bun local em `.scratch/bun-cache`.
+
+| Comando | Resultado |
+|---|---|
+| `docker compose up -d --wait` | exit 1: `permission denied ... dockerDesktopLinuxEngine` ao buscar postgres:16. Dependências já ativas responderam nos testes; isso não valida o comando Compose. |
+| `bun run scripts/scan-forbidden.ts` | exit 1: `EPERM: operation not permitted, uv_spawn 'git'`, linha 11. safe.directory fornecido só no ambiente do comando para este checkout, sem mudar configuração global. |
+| `bun run typecheck` | exit 0: `Checked 255 installs across 261 packages (no changes)`; `tsc --noEmit -p tsconfig.json`, sem erros. |
+| `bun run test:unit` | exit 1: **285 pass / 1 fail / 581 expect**, 286 testes/15 arquivos. Única falha: FaultInjector não cria subprocesso Bun (`EPERM`), antes de testar SIGKILL. |
+| `bun run test:acceptance` | exit 1: **22 pass / 1 fail / 90 expect**, 23 testes/2 arquivos. Ataques de schema verdes; setup HTTP falha em `app-process.ts:94`, Bun.spawn EPERM. |
+| `bun run test:integration` | exit 1: **40 pass / 2 fail / 253 expect**, 42 testes/9 arquivos. Workers, migrations, infraestrutura, regressões e os 9 casos da fase 09 passam. Setups distribuídos SQS/API falham em Bun.spawn EPERM. |
+| `for i in 1 2 3; do bun run test:concurrency || exit 1; done` | Equivalente PowerShell executado com interrupção na primeira falha: exit 1, rodada 1 **0 pass / 10 fail**, criação de processos Bun EPERM. Rodadas 2 e 3 não executadas, conforme `exit 1`. |
+| `test -s README.md && test -s ARCHITECTURE.md` | Literal via Git Bash: exit 256, `CreateFileMapping ... Win32 error 5`, antes dos builtins. Equivalente PowerShell Get-Item/Length > 0: exit 0, ambos não vazios (10.251 / 23.492 bytes na primeira checagem). |
+| Extra: `bun run lint` | exit 0: `Checked 115 files ... No fixes applied.` |
+
+- Uma chamada do terminal não chegou a iniciar (`CreateProcessAsUserW failed: 5`);
+  foi repetida quando o PowerShell voltou a iniciar. Não foram alterados timeouts,
+  retries, processos de teste ou proteções financeiras para contornar permissões.
+- Verificação final: links locais dos dois documentos válidos, `git diff --check`
+  limpo e diff vazio em `test/acceptance/**`, `reference/**`, `docs/CHALLENGE.md`.
+  Somente README, ARCHITECTURE, DECISOES e PROGRESS alterados/criados.
+- Pendente: reexecutar o portão inteiro com acesso ao Docker, subprocessos Bun/Git
+  e shell funcional; corrigir falhas reais que essa execução revelar. As pendências
+  de auditoria/prove-red das fases anteriores continuam registradas. **Fase 10 não
+  aprovada nesta sessão**; documentação pronta não substitui portão verde.
 
 ## Fase 09 — sessão de 2026-10-29 [autopilot]
 
