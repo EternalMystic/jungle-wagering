@@ -21,6 +21,10 @@ export interface AppConfig {
   readonly queues: QueueNames;
   readonly httpPort: number;
   readonly readinessTimeoutMs: number;
+  /** Conexões do pool do processo (D16: ≥ requisições simultâneas que devem esperar NO banco). */
+  readonly dbPoolMax: number;
+  /** `lock_timeout` de cada transação (D3); > 3 s exigido pelos testes de disputa (D16). */
+  readonly lockTimeoutMs: number;
 }
 
 export const DEFAULT_DATABASE_URL = "postgres://postgres:postgres@localhost:55432/wagering";
@@ -86,5 +90,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
     },
     httpPort: positiveInt(env, "PORT", 3000, 65535),
     readinessTimeoutMs: positiveInt(env, "READINESS_TIMEOUT_MS", 2000, 60000),
+    dbPoolMax: positiveInt(env, "DB_POOL_MAX", 20, 1000),
+    lockTimeoutMs: positiveInt(env, "LOCK_TIMEOUT_MS", 5000, 600000),
   };
 }

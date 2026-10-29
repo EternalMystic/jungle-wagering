@@ -276,3 +276,44 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   arrays e objetos planos); chaves ordenadas pela ordem de code unit UTF-16; `undefined`
   omitido. O DTO deve normalizar `null` → ausente antes de montar o `WagerPayload`.
   Domínio usa `node:crypto` (biblioteca padrão, não framework).
+
+## D19. Use cases + HTTP (fase 04) [autopilot]
+
+- **Persistência em SQL explícito, sem EntitySchema (por ora)**: `MikroOrmUnitOfWork.run` =
+  `em.fork().transactional(...)`; dentro dela os repositórios usam o `Knex.Transaction` do
+  próprio EM (`em.getTransactionContext()`) com placeholders `?` → parâmetros posicionais do
+  driver (nada interpolado). Motivo: o caminho crítico inteiro é SQL que o flush do UoW não
+  expressa (`FOR UPDATE`, UPDATE condicionado a versão/saldo, tradução de 23505 por nome de
+  constraint). Registros (`records.ts`) + mappers → `X.rehydrate`. O knex/pg do MikroORM devolve
+  TIMESTAMPTZ como string: o mapper normaliza para ISO-8601 estrito (sem confiar em parsing
+  leniente) e recusa formato inesperado.
+- **`lock_timeout`** por transação via `set_config('lock_timeout', $1, true)` (5 s, `LOCK_TIMEOUT_MS`);
+  `55P03`, `40001`, `40P01`, `08xxx`, `57P0x`, pool esgotado → `TransientInfrastructureError` → 503
+  `Retry-After: 1`. **`DB_POOL_MAX`** (padrão 20) define o pool do knex.
+- **UPDATE da wallet**: `WHERE id AND version = v_anterior AND balance_amount = saldo_anterior AND
+  balance_amount >= débito`; 0 linhas → `LostUpdateError` (500). Com o lock é inalcançável; sem
+  o lock (sabotagem da linha 2) é o que transforma lost update em erro em vez de saldo errado.
+- **Corrida 23505** em `uq_tx_idempotency_key`/`uq_tx_provider_external` (só possível contra
+  transação de OUTRA wallet, pois a mesma wallet está serializada): rollback e nova tentativa
+  completa (no máximo 3), que relê → replay/409.
+- **Ordem das verificações sob o lock**: key (replay/409) → (provider, external) com outra key
+  (409) → wallet inexistente (422 `WALLET_NOT_FOUND`, `transactionId: null`, nada persistido) →
+  moeda (`CURRENCY_MISMATCH`) → player (`WALLET_PLAYER_MISMATCH`) → referência → saldo.
+- **Referências** (`wager-rules.ts`, pura): WIN/LOSS só podem referenciar BET; REFUND → BET;
+  ROLLBACK → BET/WIN/REFUND. Ordem: escopo (provider, player, wallet, moeda, rodada) → tipo →
+  estado → valor (só reversões) → já revertida (só reversões). Referência ausente **ou ainda não
+  terminal** (ex.: ROLLBACK de um REFUND pendente) → PENDING_REFERENCE (nunca credita antes da
+  referência existir); referência REJECTED/FAILED → `REFERENCE_NOT_PROCESSED`. WIN/LOSS com
+  referência ausente também aguardam (mais seguro que creditar um WIN sem BET).
+- **PENDING_REFERENCE**: primeira tentativa em +5 s (D8), evento `WagerTransactionPendingReference`,
+  202. Resolução ansiosa e worker ficam para a fase do worker (PLANO S7), como manda esta fase.
+- **HTTP**: corpo único para 200/202/422 `{transactionId, status, balance, failureCode, idempotentReplay}`
+  (`balance` null em PENDING_REFERENCE e WALLET_NOT_FOUND; `failureCode` null fora de rejeição).
+  FAILED (inalcançável por ora) → 422. `kind: OPENING` → 400 `INVALID_PAYLOAD`; BET com referência
+  → 400; REFUND/ROLLBACK sem referência → 400. `referenceExternalTransactionId: null` = ausente.
+  UUIDs normalizados para minúsculas na borda (o escopo compara strings). Id malformado em GET → 404.
+  JSON malformado → 400 `INVALID_PAYLOAD`. `X-Correlation-Id` aceito (ASCII visível ≤ 128) ou gerado.
+- **OPENING** emite `WagerTransactionProcessed` + `WalletBalanceChanged` (o saldo mudou); as
+  invariantes I6/I7 isentam OPENING, mas consumidores do saldo precisam do primeiro movimento.
+- **Consultas**: `GET /wallets/:id`, `GET /wagering/transactions/:id`,
+  `GET /providers/:p/wagering/transactions/:ext` feitos; ledger paginado e reconciliação = PLANO S9.

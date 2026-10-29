@@ -5,9 +5,43 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 03 — migration real + domínio (feita; portão a confirmar pelo orquestrador)
-- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c)
-- Sabotagens comprovadas (`/prove-red`): —
+- Fase atual: 04 — use cases + HTTP (feita; portão rodado pelo agente, a confirmar pelo orquestrador)
+- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b)
+- Sabotagens comprovadas (`/prove-red`): linhas 2 e 3 (abaixo)
+
+## Sabotagens comprovadas
+
+Worktree descartável (`.scratch/prove-red-tmp`, branch `prove-red-tmp`, base = código da fase 04),
+sabotagem só em produção/migration, teste de aceitação intocado; worktree e branch removidos.
+
+| Linha | Sabotagem | Teste | Resultado |
+|---|---|---|---|
+| 2 (sem lost update) | `lockById`: `… FOR UPDATE` → `SELECT` simples | A `§8 … duas BETs de 80.00` | VERMELHO: `statuses` = `[200, 500]` ≠ `[200, 422]`. O perdedor leu 100.00 sem lock, decidiu debitar e o UPDATE condicionado (`version = 1`) casou 0 linhas → `LostUpdateError`. Saldo seguiu correto (defesa em profundidade), mas a garantia de negócio caiu. Controle sem sabotagem: verde. |
+| 3 (sem duplicata) | sem `findByIdempotencyKey` + sem `uq_tx_idempotency_key` na migration | A `mesma BET 50×` | VERMELHO: 49 × `409` em vez de replays (a camada 2 de D4, `(provider, external)`, ainda barrou o débito). |
+| 3 (variante forte) | acima + sem `findByProviderExternalId` + sem `uq_tx_provider_external` | A `mesma BET 50×` e `10 keys diferentes` | VERMELHO: `originals` com 50 (50 débitos), e `[200×10]` em vez de `[200, 409×9]`. |
+
+## Fase 04 — feito (decisões em D19)
+
+- `src/application/`: `wager-rules.ts` (decisão pura D7/D8: APPLY/RECORD/REJECT/WAIT_REFERENCE),
+  `process-wager-transaction.ts` (contrato transacional na ordem do CLAUDE.md; 23505 → rollback e
+  releitura), `open-wallet.ts` (wallet + OPENING + CREDIT v1 + eventos num commit),
+  `wagering-queries.ts`, `errors.ts`, `ports/{unit-of-work,clock,id-generator}.ts`.
+- `src/infrastructure/persistence/`: `MikroOrmUnitOfWork` (`em.transactional` + `lock_timeout`
+  + classificação de transitórios), `sql-repositories.ts` (FOR UPDATE, UPDATE condicionado, ledger
+  append-only, outbox), `records.ts` (mappers → `rehydrate`; TIMESTAMPTZ chega como string),
+  `pg-errors.ts`. Config: `DB_POOL_MAX`, `LOCK_TIMEOUT_MS`.
+- `src/interface/http/`: `POST /wallets` (201/409/400), `POST /wagering/transactions`
+  (200/202/422/400/409/503), 3 GETs (404), filtro global D5 (`http-problem.ts`), DTOs sem libs.
+- Testes: `test/unit/application/wager-rules.test.ts` (30 casos; mostrado VERMELHO — módulo
+  inexistente — antes da implementação, depois VERDE), `process-wager-transaction.test.ts` (use case
+  com UoW falsa SÓ em unit: replay original, payload divergente → conflito, mesma operação com outra
+  key, corrida 23505, pendência, reversões), `persistence-records.test.ts`;
+  `test/integration/wagering-api.test.ts` (17 casos contra o processo real: 400/409/422/202/404,
+  linhas 5, 20, 23, 25, banco conferido + invariantes).
+- Resultados locais: aceitação 30/30 (era 22/30), unit 234/234, integração 32/32 (inclui health,
+  stack, migrations, SQS), typecheck/lint/scan limpos.
+- Não feito (fases futuras, conforme PLANO): inbox/consumer SQS (S6), worker de pendências e
+  resolução ansiosa (S7), ledger paginado + reconciliação + pino/métricas (S9).
 
 ## Fase 03 — feito (decisões em D18)
 
@@ -115,7 +149,9 @@ transação (404 nos testes HTTP). Decisões novas: D16 em `docs/DECISOES.md`.
 
 ## Próxima ação
 
-- Orquestrador roda o portão da fase 03. Com a migration real, os testes de SCHEMA da
-  aceitação devem passar a ficar verdes; os HTTP continuam vermelhos (sem rotas).
-- Próxima fase: persistência (EntitySchema + mappers ↔ `rehydrate`) e use cases, honrando
-  D16, D17 e D18. Rodar `/prove-red` nas garantias de schema (linhas 7, 8, 19 da matriz).
+- Orquestrador roda o portão da fase 04 (o agente rodou todos os comandos; saída no fim da sessão).
+- Próxima fase (PLANO S5): FaultInjector + harness multi-processo + testes de concorrência §13.
+  Ao ligar o consumer SQS, inserir a inbox no passo 2 de `ProcessWagerTransaction.attempt`
+  (depois do lock, antes da busca por key). Ainda pendente: `/prove-red` das linhas 7, 8, 19.
+- Nota de ambiente (2026-10-29): `docker`/`bun`/`tsc` funcionaram nesta sessão; worktree fora do
+  projeto é bloqueado pelo sandbox — usar `.scratch/` (removido no fim).

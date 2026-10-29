@@ -12,6 +12,14 @@ describe("loadConfig", () => {
       walletEvents: "wallet-events.fifo",
     });
     expect(config.httpPort).toBe(3000);
+    expect(config.dbPoolMax).toBe(20);
+    expect(config.lockTimeoutMs).toBe(5000);
+  });
+
+  test("DB_POOL_MAX e LOCK_TIMEOUT_MS vêm do ambiente (D16: os testes sobem o processo com pool 60)", () => {
+    const config = loadConfig({ DB_POOL_MAX: "60", LOCK_TIMEOUT_MS: "7000" });
+    expect(config.dbPoolMax).toBe(60);
+    expect(config.lockTimeoutMs).toBe(7000);
   });
 
   test("respeita variáveis de ambiente", () => {

@@ -16,6 +16,7 @@ export function mikroOrmConfig(config: AppConfig) {
     discovery: { warnWhenNoEntities: false },
     extensions: [Migrator],
     debug: false,
+    pool: { min: 0, max: config.dbPoolMax },
     migrations: {
       tableName: MIGRATIONS_TABLE,
       migrationsList,

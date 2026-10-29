@@ -1,16 +1,27 @@
 import { type DynamicModule, Inject, Injectable, Module, type OnApplicationShutdown } from "@nestjs/common";
 import type { SQSClient } from "@aws-sdk/client-sqs";
+import { OpenWallet } from "./application/open-wallet";
+import type { UnitOfWork } from "./application/ports/unit-of-work";
+import { ProcessWagerTransaction } from "./application/process-wager-transaction";
+import { WageringQueries } from "./application/wagering-queries";
 import type { AppConfig } from "./infrastructure/config/app-config";
 import { PostgresReadinessProbe, SqsReadinessProbe } from "./infrastructure/health/readiness-probes";
+import { MikroOrmUnitOfWork } from "./infrastructure/persistence/mikro-orm-unit-of-work";
 import type { Orm } from "./infrastructure/persistence/orm";
 import { initOrm } from "./infrastructure/persistence/orm";
 import { createSqsClient } from "./infrastructure/sqs/sqs-client";
+import { SystemClock, UuidV7Generator } from "./infrastructure/system";
 import { HealthController } from "./interface/http/health/health.controller";
 import { READINESS_PROBES, READINESS_TIMEOUT_MS } from "./interface/http/health/tokens";
+import { ID_GENERATOR, OPEN_WALLET, PROCESS_WAGER_TRANSACTION, WAGERING_QUERIES } from "./interface/http/wagering/tokens";
+import { WageringController } from "./interface/http/wagering/wagering.controller";
+import { WalletsController } from "./interface/http/wagering/wallets.controller";
 
 export const APP_CONFIG = Symbol("APP_CONFIG");
 export const ORM = Symbol("ORM");
 export const SQS_CLIENT = Symbol("SQS_CLIENT");
+export const UNIT_OF_WORK = Symbol("UNIT_OF_WORK");
+export const CLOCK = Symbol("CLOCK");
 
 // Tipos estruturais locais: o metadata do decorator vira `Object`, sem referenciar
 // classes importadas só como tipo (o transpiler do Bun não as tem em runtime).
@@ -40,7 +51,7 @@ export class AppModule {
   static forRoot(config: AppConfig): DynamicModule {
     return {
       module: AppModule,
-      controllers: [HealthController],
+      controllers: [HealthController, WalletsController, WageringController],
       providers: [
         { provide: APP_CONFIG, useValue: config },
         { provide: ORM, useFactory: () => initOrm(config) },
@@ -54,6 +65,20 @@ export class AppModule {
             new SqsReadinessProbe(sqs, config.queues.wagerTransactions),
           ],
         },
+        { provide: UNIT_OF_WORK, inject: [ORM], useFactory: (orm: Orm) => new MikroOrmUnitOfWork(orm, config.lockTimeoutMs) },
+        { provide: CLOCK, useValue: new SystemClock() },
+        { provide: ID_GENERATOR, useValue: new UuidV7Generator() },
+        {
+          provide: OPEN_WALLET,
+          inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR],
+          useFactory: (uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator) => new OpenWallet(uow, clock, ids),
+        },
+        {
+          provide: PROCESS_WAGER_TRANSACTION,
+          inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR],
+          useFactory: (uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator) => new ProcessWagerTransaction(uow, clock, ids),
+        },
+        { provide: WAGERING_QUERIES, inject: [UNIT_OF_WORK], useFactory: (uow: UnitOfWork) => new WageringQueries(uow) },
         InfrastructureLifecycle,
       ],
     };

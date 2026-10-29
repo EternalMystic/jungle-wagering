@@ -62,5 +62,21 @@ export function canonicalWagerPayload(payload: WagerPayload): string {
 
 /** SHA-256 hex (64 chars minúsculos) do JSON canônico em UTF-8. */
 export function payloadHash(payload: WagerPayload): string {
-  return createHash("sha256").update(canonicalWagerPayload(payload), "utf8").digest("hex");
+  return sha256Hex(canonicalWagerPayload(payload));
+}
+
+/** Hash do crédito de abertura (OPENING interno): mesmo algoritmo, campos da abertura. */
+export function openingPayloadHash(props: { readonly walletId: string; readonly playerId: string; readonly money: Money }): string {
+  return sha256Hex(
+    canonicalJson({
+      walletId: props.walletId,
+      playerId: props.playerId,
+      kind: "OPENING",
+      money: { amount: props.money.toString(), currency: props.money.currency },
+    }),
+  );
+}
+
+function sha256Hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
