@@ -4,6 +4,58 @@ Cada item: decisão · por quê · alternativa descartada. O README exige que "q
 interpretação adicional" seja documentada — as marcadas com **[interpretação]** são
 pontos em que o enunciado é ambíguo e a banca provavelmente vai perguntar.
 
+## D24. Observabilidade, consultas e reconciliação (fase 09) [autopilot]
+
+- Ledger: ordem crescente por `wallet_version`, cursor exclusivo `base64url` da versão
+  decimal canônica (sem padding); padrão 50, intervalo 1–100. Busca `limit + 1` para
+  só anunciar continuação quando existe outra linha. Cursor inválido/não canônico ou
+  versão fora do intervalo inteiro seguro retorna 400; wallet ausente retorna 404.
+  **[interpretação]** a paginação é estável por chave imutável, sem OFFSET: novos
+  commits podem aparecer nas próximas páginas, sem repetir/pular versões já lidas.
+  Uma abertura zero não tem entrada v1; a primeira movimentação aparece na versão 2.
+- `ReconcileWallet` usa `WalletReads`; a implementação SQL lê saldo, soma assinada,
+  contagem e diferença em **um SELECT**, no mesmo snapshot READ COMMITTED. Não trava
+  wallet nem compara duas leituras de instantes diferentes. Soma/diferença usam
+  NUMERIC exato do PostgreSQL e chegam como strings de escala 2 (`MoneyProps`), sem
+  conversão monetária para number e sem cast limitador NUMERIC(20,2) no agregado.
+  Isso também permite diagnosticar um ledger corrompido cuja soma exceda o teto do
+  saldo. `difference = storedBalance - calculatedBalance`, inclusive negativa.
+  Retorna 200 com `consistent: false`; incrementa métrica e loga erro com identificadores,
+  nunca valores. Não escreve wallet, ledger, transação ou outbox para "consertar".
+- D12: `JsonLogger` agora usa pino, ALS e redact; saneamento recursivo também cobre
+  campos sensíveis aninhados e instâncias de Error. Middleware HTTP gera/normaliza
+  correlationId, devolve `X-Correlation-Id` e preserva o contexto até o filtro/resposta.
+  HTTP, SQS, publisher e resolução têm escopos assíncronos independentes. O logger
+  Nest também emite JSON sanitizado, sem copiar mensagens/stacks arbitrários.
+- `PrometheusMetrics` possui Registry por aplicação, sem labels de IDs/payloads.
+  `wager_transactions_total{status,kind}` conta transições **confirmadas**, incluindo
+  OPENING e resolução de pendências (PENDING_REFERENCE e terminal são transições
+  distintas). A UoW acumula observações por tentativa e só as aplica após o commit;
+  rollback/replay não contam nova decisão. Duplicatas de inbox também só contam após
+  commit. Replays e latência são observados no adaptador compartilhado HTTP/SQS em
+  torno do mesmo ProcessWagerTransaction; latência inclui erro/tentativas SQL.
+- `sqs_retries_total` conta decisões de retry de mensagens; `sqs_dlq_total{reason}`
+  conta envios explícitos bem-sucedidos à DLQ, antes do ack. A redrive automática do
+  SQS continua uma garantia da fila: este contador não pretende observar entregas
+  realizadas internamente pelo serviço. `lock_conflicts_total` conta 55P03/40001/40P01,
+  inclusive causas embrulhadas. Lag é recalculado sobre a outbox confirmada em cada
+  scrape, incluindo lease/backoff. Histograma e contadores são telemetria do processo
+  e podem reiniciar/perder a última observação em crash; nunca substituem o ledger.
+- D11: AuthGuard nos controllers financeiros delega a ProviderIdentityPort. O adapter
+  NoopProviderIdentity retorna ausência de identidade e permite acesso, conforme §2;
+  não simula validação de token. Adapter futuro com IdP externo (Keycloak, client
+  credentials por provedor) devolve providerId verificado, comparado pelo guard ao
+  providerId da rota/corpo. Health, metrics e SQS não passam pelo guard.
+- Testes novos rodam Nest, PostgreSQL e SQS reais no processo de teste, com banco e
+  filas descartáveis; os testes distribuídos existentes continuam exigindo Bun.spawn.
+  Consumers distintos do caso de observabilidade usam filas distintas: abortar um
+  long poll pode deixar ReceiveMessage em voo no servidor. Reutilizar imediatamente
+  a fila permitia que o poll antigo tornasse invisível uma mensagem do novo cenário.
+  Não se ampliou timeout/retry nem se acrescentou sleep para esconder a disputa.
+- Dependências pino/prom-client exigidas por D12 instaladas; cache Bun da sessão em
+  `.scratch/bun-cache` porque o cache global não permite escrita. `.scratch/` ignorado
+  para não versionar cache, logs ou tentativas de worktree.
+
 ## D23. Correções da auditoria (fase 08) [autopilot]
 
 - **[interpretação]** Crédito cujo saldo resultante excederia `NUMERIC(20,2)` é

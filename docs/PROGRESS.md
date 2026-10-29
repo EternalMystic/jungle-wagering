@@ -5,9 +5,66 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 08 — Auditoria e correção (duas ALTA corrigidas; portão BLOQUEADO por permissões do ambiente)
+- Fase atual: 09 — Observabilidade, reconciliação e consultas implementadas; portão BLOQUEADO por permissões do ambiente
 - Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3), 05 (364aeb7)
 - Sabotagens comprovadas (`/prove-red`): linhas 2, 3 e 11 (abaixo)
+
+## Fase 09 — sessão de 2026-10-29 [autopilot]
+
+- Implementados D11/D12: pino JSON com ALS/redact, saneamento recursivo de campos
+  sensíveis/erros e adapter JSON para logs Nest; contexto por requisição HTTP,
+  mensagem SQS, publicação de outbox e resolução de pendência. CorrelationId validado
+  ou gerado e devolvido no header. AuthGuard financeiro delega a ProviderIdentityPort
+  com adapter no-op; health/metrics/SQS permanecem fora do guard.
+- `/metrics` usa prom-client com Registry por aplicação e todas as famílias de D12:
+  decisões por status/kind, replay por canal, inbox, retry, DLQ explícita por motivo,
+  conflitos de lock, lag, histograma de latência e divergências. UoW só observa
+  decisões/inbox após commit; não conta rollback, replay ou mero reagendamento como
+  decisão nova. Resolução ansiosa/worker também é observada. Sem labels de IDs.
+- `GET /wallets/:walletId/ledger`: cursor base64url canônico da wallet_version,
+  exclusivo/crescente, limit 1–100 (default 50), limit+1 para continuação, rehydrate
+  dos lançamentos e valores exatos. Demais GETs da §9 preservados e cobertos novamente.
+- `POST /wallets/:walletId/reconciliation`: saldo, soma assinada do ledger, diferença
+  e contagem lidos em SELECT único, inclusive sob escrita financeira não confirmada.
+  Abertura zero e teto monetário tratados exatamente; divergência retorna
+  consistent=false, loga contexto sem valores e incrementa contador. Não corrige
+  wallet/ledger nem produz outbox. Sem mudança de schema ou regra financeira.
+- Novos testes: 9 I em `phase09-http.test.ts` (Nest, PG e SQS reais, todos terminam
+  com I1–I8 vazias) e 3 U em `observability.test.ts` (redação aninhada, contextos
+  sobrepostos e porta de identidade). TDD inicial: **1 pass / 5 fail / 14 expect**
+  na integração (404/métricas ausentes) e **0 pass / 1 fail / 2 expect** no logger
+  (sentinela financeira vazava). Execução dirigida após implementação: **12 pass /
+  0 fail / 100 expect**; asserções adicionais de outbox/erro bruto também passaram
+  nas suítes finais. Integração prova rollback sem métrica, pendência/terminal,
+  inbox duplicada, lock timeout real → retry → commit único e envio real à DLQ.
+- Decisões de cursor/snapshot/semântica das métricas/identidade em D24 [autopilot];
+  matriz atualizada (28, 33, 34). Cache Bun local e logs em `.scratch/` (ignorado).
+  Nenhuma fase futura iniciada; nenhum teste preexistente ou caminho congelado editado.
+- `/prove-red` tentou `git worktree add .scratch/prove-red-phase09 -b prove-red-phase09 HEAD`:
+  exit 1, `cannot lock ref ... prove-red-phase09.lock: Permission denied`. Nenhuma
+  sabotagem aplicada na árvore principal; prova isolada das garantias novas pendente.
+
+### Portão final da fase 09 — saídas observadas
+
+| Comando | Resultado |
+|---|---|
+| `docker compose up -d --wait` | exit 1: `permission denied ... dockerDesktopLinuxEngine`. PG/SQS já ativos continuam acessíveis. |
+| `bun run scripts/scan-forbidden.ts` | exit 1: `EPERM ... uv_spawn 'git'`. safe.directory restrito ao comando via env, sem alterar config global. |
+| `bun run typecheck` | exit 0: 255 installs/261 packages sem mudanças + `tsc --noEmit -p tsconfig.json`. |
+| `bun run test:unit` | **285 pass / 1 fail / 581 expect**; única falha é Bun.spawn EPERM no FaultInjector. |
+| `bun run test:acceptance` | **0 pass / 2 fail**; setup não cria subprocesso de migration (Bun.spawn EPERM). Novo fingerprint inclui dependências/persistência da fase. |
+| `bun run test:integration` | **40 pass / 2 fail / 253 expect**; os 9 casos novos passam, além de workers/schema/health/SQS. Dois setups distribuídos bloqueados por Bun.spawn EPERM. |
+| `for i in 1 2 3; do bun run test:concurrency || exit 1; done` | Equivalente PowerShell executado: primeira rodada **0 pass / 6 fail**, Bun.spawn EPERM no setup; exit 1 interrompeu o laço, sem rodadas 2/3. |
+| Extra: `bun run lint` | exit 0: **115 arquivos**, nenhuma correção aplicada. |
+| Extra: Bun.Glob + checkText | exit 0: **110 arquivos src/test**, zero violações (inclui os novos); não substitui o scan oficial. |
+
+- Saídas completas do portão: `.scratch/phase09-gate/*.log`. `git diff --check`
+  limpo e diff vazio em `test/acceptance/**`, `reference/**`, `docs/CHALLENGE.md`.
+  Nenhum commit feito, conforme instrução do orquestrador.
+- Pendente: reexecutar TODOS os comandos do portão e `/prove-red` com permissões
+  para Docker, subprocessos Bun/Git e refs/worktree; corrigir qualquer falha real
+  revelada. **Fase 09 não aprovada nesta sessão**. Não substituir os testes
+  distribuídos/crash por execução no mesmo processo para declarar verde.
 
 ## Fase 08 — sessão de 2026-10-29 [autopilot]
 

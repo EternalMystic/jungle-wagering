@@ -9,6 +9,13 @@ import {
 } from "@nestjs/common";
 import type { SQSClient } from "@aws-sdk/client-sqs";
 import { OpenWallet } from "./application/open-wallet";
+import { ReconcileWallet } from "./application/reconcile-wallet";
+import { SqlWalletReads } from "./infrastructure/persistence/sql-wallet-reads";
+import { METRICS, PrometheusMetrics } from "./infrastructure/metrics/prometheus-metrics";
+import { ObservedWagerProcessor } from "./infrastructure/observed-wager-processor";
+import { NoopProviderIdentity } from "./infrastructure/noop-provider-identity";
+import { AuthGuard, PROVIDER_IDENTITY } from "./interface/http/auth.guard";
+import { WALLET_READS, RECONCILE_WALLET, WalletQueriesController } from "./interface/http/wallet-queries.controller";
 import type { FaultInjector } from "./application/ports/fault-injector";
 import type { UnitOfWork } from "./application/ports/unit-of-work";
 import { ProcessWagerTransaction } from "./application/process-wager-transaction";
@@ -111,9 +118,12 @@ export class AppModule {
   static forRoot(config: AppConfig): DynamicModule {
     return {
       module: AppModule,
-      controllers: [HealthController, WalletsController, WageringController, OutboxMetricsController],
+      controllers: [HealthController, WalletsController, WageringController, WalletQueriesController, OutboxMetricsController],
       providers: [
         { provide: APP_CONFIG, useValue: config },
+        { provide: METRICS, useFactory: () => new PrometheusMetrics() },
+        { provide: PROVIDER_IDENTITY, useClass: NoopProviderIdentity },
+        AuthGuard,
         { provide: ORM, useFactory: () => initOrm(config) },
         { provide: SQS_CLIENT, useFactory: () => createSqsClient(config.aws) },
         { provide: READINESS_TIMEOUT_MS, useValue: config.readinessTimeoutMs },
@@ -125,7 +135,12 @@ export class AppModule {
             new SqsReadinessProbe(sqs, config.queues.wagerTransactions),
           ],
         },
-        { provide: UNIT_OF_WORK, inject: [ORM], useFactory: (orm: Orm) => new MikroOrmUnitOfWork(orm, config.lockTimeoutMs) },
+        { provide: UNIT_OF_WORK, inject: [ORM, METRICS], useFactory: (orm: Orm, metrics: PrometheusMetrics) => new MikroOrmUnitOfWork(orm, config.lockTimeoutMs, metrics) },
+        { provide: WALLET_READS, inject: [UNIT_OF_WORK], useFactory: (uow: MikroOrmUnitOfWork) => new SqlWalletReads(uow) },
+        { provide: RECONCILE_WALLET, inject: [WALLET_READS, METRICS], useFactory: (reads: SqlWalletReads, metrics: PrometheusMetrics) => {
+          const logger = new JsonLogger("reconciliation");
+          return new ReconcileWallet(reads, metrics, { divergence: (walletId) => logger.error("wallet reconciliation divergence", { walletId }) });
+        } },
         { provide: OUTBOX_METRICS, inject: [UNIT_OF_WORK], useFactory: (uow: MikroOrmUnitOfWork) => new SqlBackgroundStore(uow) },
         { provide: CLOCK, useValue: new SystemClock() },
         { provide: ID_GENERATOR, useValue: new UuidV7Generator() },
@@ -137,20 +152,21 @@ export class AppModule {
         },
         {
           provide: PROCESS_WAGER_TRANSACTION,
-          inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR, FAULT_INJECTOR],
-          useFactory: (uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator, faults: FaultInjector) =>
-            new ProcessWagerTransaction(uow, clock, ids, faults),
+          inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR, FAULT_INJECTOR, METRICS],
+          useFactory: (uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator, faults: FaultInjector, metrics: PrometheusMetrics) =>
+            new ObservedWagerProcessor(new ProcessWagerTransaction(uow, clock, ids, faults), metrics),
         },
         { provide: WAGERING_QUERIES, inject: [UNIT_OF_WORK], useFactory: (uow: UnitOfWork) => new WageringQueries(uow) },
         {
           provide: WAGER_CONSUMER,
-          inject: [SQS_CLIENT, PROCESS_WAGER_TRANSACTION, FAULT_INJECTOR, ID_GENERATOR],
-          useFactory: (sqs: SQSClient, processWager: ProcessWagerTransaction, faults: FaultInjector, ids: UuidV7Generator) =>
+          inject: [SQS_CLIENT, PROCESS_WAGER_TRANSACTION, FAULT_INJECTOR, ID_GENERATOR, METRICS],
+          useFactory: (sqs: SQSClient, processWager: ObservedWagerProcessor, faults: FaultInjector, ids: UuidV7Generator, metrics: PrometheusMetrics) =>
             new WagerQueueConsumer({
               sqs,
               queues: config.queues,
               config: config.consumer,
               processWager,
+              metrics,
               faults,
               logger: new JsonLogger("sqs-consumer"),
               generateId: () => ids.next(),

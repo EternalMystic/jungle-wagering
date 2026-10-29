@@ -13,6 +13,8 @@ import type { ConsumerConfig, QueueNames } from "../../infrastructure/config/app
 import { type Logger, errorText } from "../../infrastructure/logging/json-logger";
 import { classifyFailure, retryDelaySeconds } from "./retry-policy";
 import { type ParsedWagerMessage, type PoisonReason, parseWagerMessage } from "./wager-message";
+import { NO_METRICS, type Metrics } from "../../application/ports/metrics";
+import { enrichLogContext, withLogContext } from "../../infrastructure/logging/log-context";
 
 /** Nome do consumidor na PK da inbox `(consumer_name, message_id)`. */
 export const WAGER_CONSUMER_NAME = "wager-transactions-consumer";
@@ -29,6 +31,7 @@ export interface WagerConsumerDeps {
   readonly faults: FaultInjector;
   readonly logger: Logger;
   readonly generateId: () => string;
+  readonly metrics?: Metrics;
 }
 
 /** Espera entre falhas do próprio ReceiveMessage (SQS fora, fila inexistente). */
@@ -150,15 +153,22 @@ export class WagerQueueConsumer {
   }
 
   private async handle(message: Message): Promise<Outcome> {
+    return withLogContext({ messageId: message.MessageId }, () => this.handleInContext(message));
+  }
+
+  private async handleInContext(message: Message): Promise<Outcome> {
     const receiveCount = receiveCountOf(message);
     const log = { sqsMessageId: message.MessageId, receiveCount };
     let parsed: ParsedWagerMessage | undefined;
     try {
       parsed = parseWagerMessage(message.Body, this.deps.generateId);
+      enrichLogContext({ messageId: parsed.messageId, correlationId: parsed.command.correlationId,
+        walletId: parsed.command.walletId, providerId: parsed.command.providerId });
       const result = await this.deps.processWager.execute(parsed.command, {
         consumerName: WAGER_CONSUMER_NAME,
         messageId: parsed.messageId,
       });
+      enrichLogContext({ transactionId: result.transactionId });
       // COMMIT confirmado. Morrer aqui = mensagem volta e a inbox reconhece (§13 concorrência 5)
       this.deps.faults.checkpoint(FaultPoint.AfterCommitBeforeAck);
       await this.ack(message);
@@ -219,6 +229,7 @@ export class WagerQueueConsumer {
       });
       return this.retry(message, receiveCountOf(message), sendError, false, log);
     }
+    (this.deps.metrics ?? NO_METRICS).sqsDlq(reason);
     await this.ack(message);
     this.deps.logger.warn("sqs message dead-lettered", { ...fields(log), reason, error: detail });
     return "dead-lettered";
@@ -233,6 +244,7 @@ export class WagerQueueConsumer {
   ): Promise<Outcome> {
     this.pending.delete(handleOf(message));
     const delay = retryDelaySeconds(receiveCount, this.deps.config.retryBaseSeconds, this.deps.config.retryMaxSeconds);
+    (this.deps.metrics ?? NO_METRICS).sqsRetry();
     const entry = { ...fields(log), retryInSeconds: delay, transient: expected, error: errorText(error) };
     if (expected) this.deps.logger.warn("sqs message will be retried", entry);
     else this.deps.logger.error("sqs message will be retried", entry);

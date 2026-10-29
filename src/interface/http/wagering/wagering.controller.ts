@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Headers, Inject, Param, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Inject, Param, Post, Res, UseGuards } from "@nestjs/common";
+import { AuthGuard } from "../auth.guard";
+import { enrichLogContext } from "../../../infrastructure/logging/log-context";
 import { FaultPoint } from "../../../application/ports/fault-injector";
 import type { WagerCommand, WagerResult } from "../../../application/process-wager-transaction";
 import type { WagerTransaction } from "../../../domain/wager-transaction";
@@ -31,6 +33,7 @@ interface FaultPort {
 }
 
 @Controller()
+@UseGuards(AuthGuard)
 export class WageringController {
   constructor(
     @Inject(PROCESS_WAGER_TRANSACTION) private readonly processWager: ProcessWagerPort,
@@ -53,6 +56,7 @@ export class WageringController {
     const key = parseIdempotencyKey(idempotencyKey);
     const command = parseWagerCommand(body, key, correlationIdFrom(correlation, () => this.ids.next()));
     const result = await this.processWager.execute(command);
+    enrichLogContext({ transactionId: result.transactionId });
     // para o HTTP, a resposta é o "ack": morrer aqui = cliente sem resposta, efeito confirmado
     this.faults.checkpoint(FaultPoint.AfterCommitBeforeAck);
     res.status(wagerHttpStatus(result.status));
@@ -63,6 +67,7 @@ export class WageringController {
   async byId(@Param("transactionId") transactionId: string): Promise<TransactionResponse> {
     const tx = await this.queries.transaction(notFoundUnlessUuid(transactionId, "transaction"));
     if (tx === undefined) throw new HttpProblem(404, "NOT_FOUND", `transaction ${transactionId} not found`);
+    enrichLogContext({ walletId: tx.walletId, providerId: tx.providerId, transactionId: tx.id });
     return transactionResponse(tx);
   }
 
@@ -75,6 +80,7 @@ export class WageringController {
     if (tx === undefined) {
       throw new HttpProblem(404, "NOT_FOUND", `transaction ${providerId}/${externalTransactionId} not found`);
     }
+    enrichLogContext({ walletId: tx.walletId, providerId: tx.providerId, transactionId: tx.id });
     return transactionResponse(tx);
   }
 }

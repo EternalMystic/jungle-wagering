@@ -9,6 +9,12 @@ function shape(error: unknown): PgErrorShape {
   return typeof error === "object" && error !== null ? (error as PgErrorShape) : {};
 }
 
+export function isLockConflict(error: unknown, depth = 0): boolean {
+  const code = shape(error).code;
+  if (code === "55P03" || code === "40001" || code === "40P01") return true;
+  return error instanceof Error && error.cause !== undefined && depth < 3 && isLockConflict(error.cause, depth + 1);
+}
+
 export function isUniqueViolation(error: unknown, constraint: string): boolean {
   const e = shape(error);
   return e.code === "23505" && e.constraint === constraint;

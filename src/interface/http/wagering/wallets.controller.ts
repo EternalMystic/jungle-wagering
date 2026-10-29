@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Headers, HttpCode, Inject, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, Inject, Param, Post, UseGuards } from "@nestjs/common";
+import { AuthGuard } from "../auth.guard";
+import { enrichLogContext } from "../../../infrastructure/logging/log-context";
 import type { OpenWalletCommand, WalletView } from "../../../application/open-wallet";
 import type { Wallet } from "../../../domain/wallet";
 import { HttpProblem } from "../http-problem";
@@ -17,6 +19,7 @@ interface IdPort {
 }
 
 @Controller("wallets")
+@UseGuards(AuthGuard)
 export class WalletsController {
   constructor(
     @Inject(OPEN_WALLET) private readonly openWallet: OpenWalletPort,
@@ -29,7 +32,9 @@ export class WalletsController {
   @HttpCode(201)
   async create(@Body() body: unknown, @Headers("x-correlation-id") correlation: unknown): Promise<WalletResponse> {
     const command = parseOpenWallet(body, correlationIdFrom(correlation, () => this.ids.next()));
-    return walletResponse(await this.openWallet.execute(command));
+    const wallet = await this.openWallet.execute(command);
+    enrichLogContext({ walletId: wallet.id });
+    return walletResponse(wallet);
   }
 
   @Get(":walletId")

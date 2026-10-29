@@ -4,6 +4,7 @@ import type { ResolvePendingReferences } from "../../application/resolve-pending
 import type { Logger } from "../logging/json-logger";
 import type { SqlBackgroundStore } from "../persistence/sql-background-store";
 import { OutboxPublisher } from "./outbox-publisher";
+import { withLogContext } from "../logging/log-context";
 
 export class BackgroundWorkers {
   private running = false;
@@ -43,8 +44,10 @@ export class BackgroundWorkers {
     const claims = await this.store.claimPending(new Date());
     for (const claim of claims) {
       if (!this.running) break;
-      try { await this.resolver.execute(claim); }
-      catch { this.logger.warn("pending reference attempt rolled back", { transactionId: claim.transactionId, walletId: claim.walletId }); }
+      await withLogContext({ transactionId: claim.transactionId, walletId: claim.walletId }, async () => {
+        try { await this.resolver.execute(claim); }
+        catch { this.logger.warn("pending reference attempt rolled back"); }
+      });
     }
   }
 

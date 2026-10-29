@@ -1,12 +1,10 @@
 import { ApplicationError } from "../../application/errors";
 import { DomainError } from "../../domain/errors";
+import pino from "pino";
+import { logContext } from "./log-context";
 
-/**
- * Log estruturado mínimo (uma linha JSON por evento) até o pino entrar (D12 / PLANO S9).
- * Campos de contexto: `correlationId, messageId, transactionId, walletId, providerId` —
- * nunca o payload financeiro completo.
- */
-export type LogFields = Readonly<Record<string, string | number | boolean | null | undefined>>;
+/** D12: pino JSON, contexto assíncrono e redação defensiva na fronteira de logging. */
+export type LogFields = Readonly<Record<string, unknown>>;
 
 export interface Logger {
   info(msg: string, fields?: LogFields): void;
@@ -15,23 +13,45 @@ export interface Logger {
 }
 
 export class JsonLogger implements Logger {
-  constructor(private readonly component: string) {}
+  private readonly logger;
+  constructor(component: string) {
+    this.logger = pino({
+      base: { component },
+      timestamp: pino.stdTimeFunctions.isoTime,
+      formatters: { level: (level) => ({ level }), log: (fields) => sanitize(fields) },
+      redact: { paths: ["money", "payload", "body", "data", "authorization", "cookie", "*.money", "*.payload"], censor: "[REDACTED]" },
+    }, { write: (line) => { process.stdout.write(line); } });
+  }
 
   info(msg: string, fields?: LogFields): void {
-    this.write("info", msg, fields);
+    this.logger.info({ ...fields, ...logContext() }, msg);
   }
 
   warn(msg: string, fields?: LogFields): void {
-    this.write("warn", msg, fields);
+    this.logger.warn({ ...fields, ...logContext() }, msg);
   }
 
   error(msg: string, fields?: LogFields): void {
-    this.write("error", msg, fields);
+    this.logger.error({ ...fields, ...logContext() }, msg);
   }
+}
 
-  private write(level: string, msg: string, fields: LogFields | undefined): void {
-    process.stdout.write(`${JSON.stringify({ time: new Date().toISOString(), level, component: this.component, msg, ...fields })}\n`);
-  }
+const SENSITIVE = /^(money|payload|body|data|amount|balance|balanceBefore|balanceAfter|storedBalance|calculatedBalance|difference|authorization|cookie|headers|password|secret|token|accessKeyId|secretAccessKey|message|stack|cause|detail)$/i;
+
+function sanitize(fields: Record<string, unknown>): Record<string, unknown> {
+  const clean = (value: unknown, depth: number): unknown => {
+    if (value instanceof Error) return errorText(value);
+    if (value === null || typeof value !== "object") return value;
+    if (depth > 8) return "[REDACTED]";
+    if (Array.isArray(value)) return value.map((v) => clean(v, depth + 1));
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => {
+      if (/^(error|err)$/i.test(key)) {
+        return [key, typeof v === "string" && /^(?:[A-Z][A-Z_]{0,127}|DATABASE_ERROR:[0-9A-Z]{5})$/.test(v) ? v : errorText(v)];
+      }
+      return [key, SENSITIVE.test(key) ? "[REDACTED]" : clean(v, depth + 1)];
+    }));
+  };
+  return clean(fields, 0) as Record<string, unknown>;
 }
 
 export function errorText(error: unknown): string {

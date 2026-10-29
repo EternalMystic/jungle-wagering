@@ -36,11 +36,13 @@ Legenda de teste: `A` = test/acceptance (congelado) · `I` = integration · `C` 
 | 25 | OPENING interno, mesma transação (§9) | use case OpenWallet; trigger de abertura | I `open wallet atomic`; I `OPENING via API → 400` | — |
 | 26 | `version` = 1 e só sobe com saldo (§6.2) | trigger diferido | A; invariante I2 | — |
 | 27 | Reinício preserva consistência (§13.8) | estado só no banco | C `restart-consistency` + invariantes | — |
-| 28 | Reconciliação não corrige em silêncio (§9) | endpoint lê, loga, métrica | I `divergence reported` (diverge via SQL com trigger desabilitado em teste) | — |
+| 28 | Reconciliação não corrige em silêncio (§9) | `ReconcileWallet` + `SqlWalletReads`: SELECT único, diferença exata; log pino e contador | I `phase09-http` › divergência deliberada, abertura zero, teto monetário, snapshot durante escrita não confirmada; I1–I8 após restaurar fixture | VERMELHO natural (404) → VERDE; worktree `/prove-red` bloqueado por permissão de ref |
 | 29 | Migrations reversíveis (§4) | `up`/`down` | I `migrations round-trip` | — |
 | 30 | Testes sem mock de PG/SQS (§14) | lint + hook | revisão do `test-skeptic` | — |
 | 31 | Crédito não ultrapassa capacidade sem bloquear pendências (§6.1, §7.1; D23) | `Money.canAdd` bigint + `decideWager` → `BALANCE_LIMIT_EXCEEDED`, mesmo commit | I `audit-regressions` › imediato/inbox/replay, ansioso, worker, teto exato | VERMELHO antes da proteção: 3 caminhos lançavam `InvalidMoneyError`; VERDE depois; `/prove-red` isolado pendente |
 | 32 | Logs não carregam payload financeiro (§12; D23) | `errorText` só códigos + filtro HTTP JSON | U `error-logging`; I `audit-regressions` › erro PostgreSQL real com sentinela | VERMELHO antes da proteção: diagnóstico ecoava JSON financeiro (`22P02`); VERDE depois; `/prove-red` isolado pendente |
+| 33 | Ledger paginado estável/opaco (§9) | cursor canônico base64url da wallet_version; comparação exclusiva + ORDER BY + limit+1 | I `phase09-http` › páginas intercaladas com commit, validação, abertura zero, IDs comparados com banco | VERMELHO natural (404) → VERDE; sabotagem isolada pendente |
+| 34 | Observabilidade sem efeitos financeiros (§12; D12) | pino + ALS/redact; Registry por app; métricas de decisões/inbox só após commit; adapter comum HTTP/SQS | U `observability` › redação aninhada e contextos sobrepostos; I `phase09-http` › rollback, pendência, inbox, retry/lock e DLQ reais | Logger vazava sentinela no VERMELHO inicial; `/metrics` sem métricas D12 falhava; VERDE após implementação; sabotagem isolada pendente |
 
 ## Invariante final de todo teste
 
