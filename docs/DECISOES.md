@@ -349,3 +349,60 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   `crash-after-commit` (HTTP before-commit e after-commit-before-ack verdes; SQS vermelho até
   a fase 06), 6 `outbox-publishers` (vermelho até 07), 7 `out-of-order-reference` (vermelho até
   07), 8 `restart-consistency`. A disputa é provada no banco (`contend`/`countLockWaiters`).
+
+## D21. Consumer SQS + inbox (fase 06) [autopilot]
+
+- **Onde**: `src/interface/sqs/` (adaptador de entrada, como o controller HTTP): `wager-message.ts`
+  (envelope §10 → `WagerCommand` com a MESMA validação do DTO HTTP; key = `data.idempotencyKey`),
+  `retry-policy.ts` (classificação + backoff, puros), `wager-consumer.ts` (laço). Ligado no
+  `AppModule` por `WagerConsumerLifecycle` (start no bootstrap; `stop` em
+  `beforeApplicationShutdown`, antes de o pool fechar). `SQS_CONSUMER_ENABLED=false` desliga.
+- **Inbox no use case**: `ProcessWagerTransaction.execute(command, delivery?)`. Ordem dentro da
+  transação: lock da wallet → `INSERT inbox … ON CONFLICT DO NOTHING` → (key → decisão →
+  escritas → outbox) → `UPDATE inbox SET processed_at` → checkpoint `before-commit` → COMMIT.
+  Inbox e efeito saem no mesmo commit; a linha de inbox só existe confirmada já processada.
+  `payload_hash` da inbox = hash de negócio D4.
+- **Redelivery** (inbox já existe, mesmo hash): não decide de novo; devolve o original achado por
+  `(provider, external)` com o mesmo hash (a key não entra no hash, então outra key na reentrega
+  ainda é a mesma mensagem). Sem transação ⇒ o original foi WALLET_NOT_FOUND e **continua** sendo,
+  mesmo que a wallet tenha sido criada depois **[interpretação: mensagem tratada não é
+  reprocessada]**. WALLET_NOT_FOUND pela fila grava a inbox (não há FK) e faz ack.
+- **Classificação** (D9): resultado de negócio (PROCESSED, REJECTED, PENDING_REFERENCE,
+  WALLET_NOT_FOUND, replay) → ack. Permanente → `SendMessage` à DLQ com atributos `reason`,
+  `detail`, `sourceMessageId`, `receiveCount` e só então `DeleteMessage` (crash no meio = nova
+  DLQ, dedup FIFO pelo `MessageId`): `INVALID_JSON`, `INVALID_ENVELOPE`, `INVALID_PAYLOAD`,
+  `IDEMPOTENCY_CONFLICT` **[escolha: conflito de key pela fila é veneno auditável, não ack
+  silencioso]**, `INBOX_PAYLOAD_MISMATCH` (mesmo messageId, outro payload). Transitório
+  (`TransientInfrastructureError`) e erro INESPERADO → `ChangeMessageVisibility` =
+  `min(base·2^(n−1), max)` (n = ApproximateReceiveCount; padrão base 2 s, teto 60 s); a
+  RedrivePolicy (5) é a rede de segurança — o consumer nunca manda transitório à DLQ por conta própria.
+  Falha ao enviar à DLQ vira retry.
+- **Ordem**: lote agrupado por `MessageGroupId`; grupos em paralelo, mensagens do grupo em
+  sequência. Transitório no meio do grupo devolve o resto do grupo (visibilidade 0; o FIFO não
+  entrega antes da que falhou). Otimização — a correção é lock por wallet + inbox.
+- **Heartbeat**: a cada visibilidade/3 o lote em andamento renova `SQS_VISIBILITY_TIMEOUT_SECONDS` (30).
+- **Drain (SIGTERM)**: aborta o long poll, espera o lote até `SQS_SHUTDOWN_GRACE_MS` (8 s,
+  < 10 s do harness), devolve com visibilidade 0 o que não terminou/não começou. Se uma
+  transação ainda confirmar depois, a reentrega é replay (inbox). **No Windows o Bun entrega
+  SIGTERM como TerminateProcess** (verificado: handler não roda, exit 143), então o drain é provado
+  em `test/unit/wager-consumer-drain.test.ts` (SQS falso), não por sinal em processo real.
+- **Postgres congelado** (`docker pause`): o servidor não responde nem fecha o socket; a query —
+  e o ROLLBACK depois dela — esperaria para sempre. Defesa: socket do `pg` com prazo de
+  inatividade `DB_SOCKET_TIMEOUT_MS` (15 s, obrigatoriamente > `LOCK_TIMEOUT_MS`), destruído ao
+  vencer ⇒ query falha, knex descarta a conexão, o servidor aborta a transação ao voltar; a
+  conexão NUNCA é reusada com transação meio-aberta (reusar uma conexão cujo `BEGIN…` ficou
+  pendurado poderia confirmar escritas parciais de outra tentativa). Também
+  `DB_CONNECT_TIMEOUT_MS` (5 s) e `DB_ACQUIRE_TIMEOUT_MS` (10 s). Ociosas também caem no prazo
+  (o pool recria). `Transaction query already complete` (knex, conexão perdida no meio) é transitório.
+- **Log**: JSON por linha (`src/infrastructure/logging/json-logger.ts`, `component: sqs-consumer`)
+  com `messageId, sqsMessageId, receiveCount, correlationId, walletId, providerId, transactionId,
+  status` — sem valores. Os testes de integração leem esses logs para provar QUE houve retry.
+- **Linha 12 da matriz (sem a inbox, a D4 ainda segura?)**: sim para a mesma key (replay pela
+  key) e para outra key com mesmo `(provider, external)` (409 → que pela fila seria DLQ
+  `IDEMPOTENCY_CONFLICT` em vez de ack). A inbox é o que transforma redelivery em ack silencioso
+  e detecta messageId reaproveitado com outro payload.
+- **Revalidação em ambiente restrito (2026-10-29) [autopilot]**: o portão deve continuar
+  vermelho quando Docker nega acesso ao pipe ou `Bun.spawn` retorna EPERM. Não substituir os
+  testes de processo/crash por execução no mesmo processo, não remover o SIGKILL e não
+  transformar falha de infraestrutura do harness em sucesso. Resultados e pendências atuais
+  ficam em `docs/PROGRESS.md`; o relato anterior de verde não valida esta nova execução.

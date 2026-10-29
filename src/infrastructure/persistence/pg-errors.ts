@@ -21,7 +21,16 @@ export function isUniqueViolation(error: unknown, constraint: string): boolean {
 const TRANSIENT_SQLSTATES = new Set(["55P03", "40001", "40P01", "57P01", "57P02", "57P03", "53300"]);
 const TRANSIENT_NODE_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "EAI_AGAIN"]);
 
-export function isTransientDatabaseError(error: unknown): boolean {
+/**
+ * Mensagens do driver/pool para conexão perdida: socket destruído pelo prazo de inatividade
+ * (D21), conexão encerrada, cliente já fechado, prazo de conexão nova. "Transaction query
+ * already complete" é como o knex reporta a próxima query de uma transação cuja conexão caiu
+ * no meio (a causa original se perde); a UoW nunca reusa uma transação encerrada.
+ */
+const TRANSIENT_MESSAGE =
+  /Connection terminated|connection.*(closed|lost)|not queryable|postgres socket without traffic|timeout expired|Timeout acquiring a connection|Transaction query already complete/i;
+
+export function isTransientDatabaseError(error: unknown, depth = 0): boolean {
   const e = shape(error);
   if (typeof e.code === "string") {
     if (TRANSIENT_SQLSTATES.has(e.code) || TRANSIENT_NODE_CODES.has(e.code)) return true;
@@ -29,5 +38,7 @@ export function isTransientDatabaseError(error: unknown): boolean {
   }
   // knex: "Timeout acquiring a connection. The pool is probably full."
   if (e.name === "KnexTimeoutError") return true;
-  return error instanceof Error && /Connection terminated|connection.*(closed|lost)/i.test(error.message);
+  if (error instanceof Error && TRANSIENT_MESSAGE.test(error.message)) return true;
+  // MikroORM embrulha o erro do driver; a causa original decide
+  return error instanceof Error && error.cause !== undefined && depth < 3 && isTransientDatabaseError(error.cause, depth + 1);
 }

@@ -4,22 +4,27 @@ import {
   WalletAlreadyExistsError,
 } from "../../application/errors";
 import type {
+  InboxRepository,
   LedgerRepository,
   OutboxRepository,
   TransactionalRepositories,
   WagerTransactionRepository,
   WalletRepository,
 } from "../../application/ports/unit-of-work";
+import type { InboxMessage } from "../../domain/inbox-message";
 import { LedgerDirection, type WalletLedgerEntry } from "../../domain/ledger-entry";
 import type { OutboxMessage } from "../../domain/outbox-message";
 import type { WagerTransaction } from "../../domain/wager-transaction";
 import type { Wallet } from "../../domain/wallet";
 import { isUniqueViolation } from "./pg-errors";
 import {
+  INBOX_COLUMNS,
+  type InboxRecord,
   TRANSACTION_SELECT,
   WALLET_COLUMNS,
   type WagerTransactionRecord,
   type WalletRecord,
+  inboxFromRecord,
   transactionFromRecord,
   walletFromRecord,
 } from "./records";
@@ -196,11 +201,45 @@ class SqlOutboxRepository implements OutboxRepository {
   }
 }
 
+class SqlInboxRepository implements InboxRepository {
+  constructor(private readonly sql: SqlSession) {}
+
+  async insertIfAbsent(message: InboxMessage): Promise<InboxMessage | undefined> {
+    // ON CONFLICT espera a transação concorrente com a mesma PK: se ela confirmar, é duplicata
+    const { rowCount } = await this.sql.query(
+      `INSERT INTO inbox_messages (consumer_name, message_id, payload_hash, received_at, processed_at)
+       VALUES (?, ?, ?, ?, NULL)
+       ON CONFLICT (consumer_name, message_id) DO NOTHING`,
+      [message.consumerName, message.messageId, message.payloadHash, message.receivedAt],
+    );
+    if (rowCount === 1) return undefined;
+    const { rows } = await this.sql.query<InboxRecord>(
+      `SELECT ${INBOX_COLUMNS} FROM inbox_messages WHERE consumer_name = ? AND message_id = ?`,
+      [message.consumerName, message.messageId],
+    );
+    if (rows[0] === undefined) {
+      throw new Error(`inbox ${message.consumerName}/${message.messageId}: conflict reported but no committed row`);
+    }
+    return inboxFromRecord(rows[0]);
+  }
+
+  async markProcessed(message: InboxMessage): Promise<void> {
+    if (message.processedAt === undefined) throw new Error(`inbox ${message.messageId}: markProcessed before the domain transition`);
+    const { rowCount } = await this.sql.query(
+      `UPDATE inbox_messages SET processed_at = ?
+        WHERE consumer_name = ? AND message_id = ? AND processed_at IS NULL`,
+      [message.processedAt, message.consumerName, message.messageId],
+    );
+    if (rowCount !== 1) throw new Error(`inbox ${message.consumerName}/${message.messageId}: mark processed matched ${rowCount} rows`);
+  }
+}
+
 export function sqlRepositories(sql: SqlSession): TransactionalRepositories {
   return {
     wallets: new SqlWalletRepository(sql),
     transactions: new SqlWagerTransactionRepository(sql),
     ledger: new SqlLedgerRepository(sql),
     outbox: new SqlOutboxRepository(sql),
+    inbox: new SqlInboxRepository(sql),
   };
 }

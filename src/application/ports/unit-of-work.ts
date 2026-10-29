@@ -1,3 +1,4 @@
+import type { InboxMessage } from "../../domain/inbox-message";
 import type { WalletLedgerEntry } from "../../domain/ledger-entry";
 import type { OutboxMessage } from "../../domain/outbox-message";
 import type { WagerTransaction } from "../../domain/wager-transaction";
@@ -44,11 +45,23 @@ export interface OutboxRepository {
   add(message: OutboxMessage): Promise<void>;
 }
 
+/** Deduplicação da fila: PK `(consumer_name, message_id)` (D4, terceira camada). */
+export interface InboxRepository {
+  /**
+   * `INSERT … ON CONFLICT DO NOTHING`. Devolve `undefined` se a linha é nova; se já existia
+   * (redelivery), devolve a linha CONFIRMADA (o ON CONFLICT espera a transação concorrente).
+   */
+  insertIfAbsent(message: InboxMessage): Promise<InboxMessage | undefined>;
+  /** Grava `processed_at` da linha inserida nesta mesma transação. */
+  markProcessed(message: InboxMessage): Promise<void>;
+}
+
 export interface TransactionalRepositories {
   readonly wallets: WalletRepository;
   readonly transactions: WagerTransactionRepository;
   readonly ledger: LedgerRepository;
   readonly outbox: OutboxRepository;
+  readonly inbox: InboxRepository;
 }
 
 /**

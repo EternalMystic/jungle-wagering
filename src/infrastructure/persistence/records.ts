@@ -1,4 +1,5 @@
 import { isFailureCode } from "../../domain/failure-codes";
+import { InboxMessage } from "../../domain/inbox-message";
 import { Money } from "../../domain/money";
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../../domain/wager-transaction";
 import { Wallet } from "../../domain/wallet";
@@ -141,5 +142,25 @@ export function transactionFromRecord(r: WagerTransactionRecord): WagerTransacti
     nextReferenceAttemptAt: toOptionalDate(r.next_reference_attempt_at),
     createdAt: toDate(r.created_at),
     resolvedAt: toOptionalDate(r.resolved_at),
+  });
+}
+
+export interface InboxRecord {
+  consumer_name: string;
+  message_id: string;
+  payload_hash: string;
+  received_at: DbTimestamp;
+  processed_at: DbTimestamp | null;
+}
+
+export const INBOX_COLUMNS = "consumer_name, message_id, payload_hash, received_at, processed_at";
+
+export function inboxFromRecord(r: InboxRecord): InboxMessage {
+  return InboxMessage.rehydrate({
+    consumerName: r.consumer_name,
+    messageId: r.message_id,
+    payloadHash: r.payload_hash,
+    receivedAt: toDate(r.received_at),
+    processedAt: toOptionalDate(r.processed_at),
   });
 }

@@ -4,7 +4,12 @@
  * Foco: ordem das decisões e o que é escrito em cada caminho.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
-import { IdempotencyConflictError, IdempotencyRaceLostError, InvalidCommandError } from "../../../src/application/errors";
+import {
+  IdempotencyConflictError,
+  IdempotencyRaceLostError,
+  InboxPayloadMismatchError,
+  InvalidCommandError,
+} from "../../../src/application/errors";
 import { OpenWallet } from "../../../src/application/open-wallet";
 import { type FaultInjector, FaultPoint } from "../../../src/application/ports/fault-injector";
 import type { TransactionalRepositories, UnitOfWork } from "../../../src/application/ports/unit-of-work";
@@ -13,6 +18,7 @@ import {
   REFERENCE_FIRST_RETRY_MS,
   type WagerCommand,
 } from "../../../src/application/process-wager-transaction";
+import { InboxMessage } from "../../../src/domain/inbox-message";
 import type { WalletLedgerEntry } from "../../../src/domain/ledger-entry";
 import { Money } from "../../../src/domain/money";
 import type { OutboxMessage } from "../../../src/domain/outbox-message";
@@ -23,11 +29,17 @@ import { Wallet } from "../../../src/domain/wallet";
 const brl = (amount: string) => Money.from({ amount, currency: "BRL" });
 const NOW = new Date("2026-10-29T12:00:00.000Z");
 
+function copyInbox(m: InboxMessage, processedAt: Date | undefined): InboxMessage {
+  const { messageId, consumerName, payloadHash: hash, receivedAt } = m;
+  return InboxMessage.rehydrate({ messageId, consumerName, payloadHash: hash, receivedAt, processedAt });
+}
+
 class FakeStore {
   wallets: Wallet[] = [];
   transactions: WagerTransaction[] = [];
   ledger: WalletLedgerEntry[] = [];
   outbox: OutboxMessage[] = [];
+  inbox: InboxMessage[] = [];
   /** simula perder a corrida do INSERT: antes do 23505, "outra transação" confirma isto */
   raceWinner: WagerTransaction | undefined;
   private committedByOthers: WagerTransaction[] = [];
@@ -78,6 +90,19 @@ class FakeStore {
           this.outbox.push(m);
         },
       },
+      inbox: {
+        insertIfAbsent: async (m) => {
+          const found = this.inbox.find((x) => x.consumerName === m.consumerName && x.messageId === m.messageId);
+          if (found !== undefined) return copyInbox(found, found.processedAt);
+          this.inbox.push(copyInbox(m, undefined));
+          return undefined;
+        },
+        markProcessed: async (m) => {
+          this.inbox = this.inbox.map((x) =>
+            x.consumerName === m.consumerName && x.messageId === m.messageId ? copyInbox(x, m.processedAt) : x,
+          );
+        },
+      },
     };
   }
 
@@ -86,7 +111,7 @@ class FakeStore {
     return {
       run: async (work) => {
         this.runs++;
-        const snapshot = { w: [...this.wallets], t: [...this.transactions], l: [...this.ledger], o: [...this.outbox] };
+        const snapshot = { w: [...this.wallets], t: [...this.transactions], l: [...this.ledger], o: [...this.outbox], i: [...this.inbox] };
         try {
           return await work(this.repositories());
         } catch (error) {
@@ -95,6 +120,7 @@ class FakeStore {
           this.committedByOthers = [];
           this.ledger = snapshot.l;
           this.outbox = snapshot.o;
+          this.inbox = snapshot.i;
           throw error;
         }
       },
@@ -347,5 +373,109 @@ describe("ProcessWagerTransaction — FaultInjector (D20)", () => {
     const res = await new ProcessWagerTransaction(store.uow(), clock, ids, faults).execute(command());
     expect(res.idempotentReplay).toBe(true);
     expect(faults.seen).toEqual([]);
+  });
+});
+
+describe("ProcessWagerTransaction — inbox da fila (passo 2, mesma unidade de trabalho)", () => {
+  const delivery = (messageId = "msg-1") => ({ consumerName: "wager-transactions-consumer", messageId });
+  const viaQueue = (c: WagerCommand, messageId?: string) =>
+    new ProcessWagerTransaction(store.uow(), clock, ids).execute(c, delivery(messageId));
+  const debits = () => store.ledger.filter((e) => e.direction === "DEBIT");
+
+  test("mensagem nova: efeito + inbox marcada processada no mesmo commit", async () => {
+    const res = await viaQueue(command());
+    expect(res).toMatchObject({ status: "PROCESSED", idempotentReplay: false });
+    expect(store.runs).toBe(1);
+    const transaction = store.transactions.find((t) => t.kind === "BET");
+    expect(transaction).toBeDefined();
+    expect(store.inbox).toHaveLength(1);
+    expect(store.inbox[0]?.messageId).toBe("msg-1");
+    expect(store.inbox[0]?.isProcessed()).toBe(true);
+    expect(store.inbox[0]?.payloadHash).toBe(transaction?.payloadHash);
+    expect(debits()).toHaveLength(1);
+  });
+
+  test("redelivery (mesmo messageId, mesmo payload) 3×: resultado ORIGINAL, nada novo escrito", async () => {
+    const first = await viaQueue(command());
+    const before = { tx: store.transactions.length, ledger: store.ledger.length, outbox: store.outbox.length, inbox: store.inbox.length };
+    for (let i = 0; i < 3; i++) {
+      const again = await viaQueue(command());
+      expect(again).toEqual({ ...first, idempotentReplay: true });
+    }
+    expect({ tx: store.transactions.length, ledger: store.ledger.length, outbox: store.outbox.length, inbox: store.inbox.length }).toEqual(before);
+  });
+
+  test("redelivery é reconhecida PELA INBOX, mesmo com outra Idempotency-Key (não chega a virar 409)", async () => {
+    const first = await viaQueue(command());
+    const again = await viaQueue(command({ idempotencyKey: "other-key" }));
+    // a key mudou, mas o hash do payload é o mesmo: a inbox responde antes da busca pela key
+    expect(again).toEqual({ ...first, idempotentReplay: true });
+    expect(debits()).toHaveLength(1);
+  });
+
+  test("mesmo messageId com payload diferente → InboxPayloadMismatchError, nada confirmado", async () => {
+    await viaQueue(command());
+    const before = { tx: store.transactions.length, ledger: store.ledger.length, outbox: store.outbox.length, inbox: store.inbox.length };
+    await expect(viaQueue(command({ externalTransactionId: "bet-2" }))).rejects.toBeInstanceOf(InboxPayloadMismatchError);
+    expect({ tx: store.transactions.length, ledger: store.ledger.length, outbox: store.outbox.length, inbox: store.inbox.length }).toEqual(before);
+  });
+
+  test("conflito de idempotência pela fila: lança e a inbox NÃO é confirmada (vai para a DLQ, não some)", async () => {
+    await submit(command());
+    await expect(viaQueue(command({ money: brl("1.00") }), "msg-conflict")).rejects.toBeInstanceOf(IdempotencyConflictError);
+    expect(store.inbox).toHaveLength(0);
+  });
+
+  test("mesma operação por HTTP e depois pela fila: replay do original; inbox registrada", async () => {
+    const http = await submit(command());
+    const queue = await viaQueue(command(), "msg-after-http");
+    expect(queue).toEqual({ ...http, idempotentReplay: true });
+    expect(store.inbox.map((m) => [m.messageId, m.isProcessed()])).toEqual([["msg-after-http", true]]);
+    expect(debits()).toHaveLength(1);
+  });
+
+  test("WALLET_NOT_FOUND pela fila: inbox confirmada; redelivery depois de a wallet existir continua WALLET_NOT_FOUND", async () => {
+    const missing = "99999999-9999-4999-8999-999999999999";
+    const res = await viaQueue(command({ walletId: missing }), "msg-missing");
+    expect(res).toMatchObject({ failureCode: "WALLET_NOT_FOUND", idempotentReplay: false });
+    expect(store.inbox.map((m) => m.isProcessed())).toEqual([true]);
+
+    const opened = Wallet.open({
+      id: missing,
+      playerId: PLAYER,
+      initialBalance: brl("100.00"),
+      at: NOW,
+      openingTransactionId: ids.next(),
+      openingEntryId: ids.next(),
+    });
+    store.wallets.push(opened.wallet);
+    const again = await viaQueue(command({ walletId: missing }), "msg-missing");
+    expect(again).toMatchObject({ failureCode: "WALLET_NOT_FOUND", idempotentReplay: true, transactionId: undefined });
+    expect(store.transactions.filter((t) => t.walletId === missing)).toHaveLength(0);
+  });
+
+  test("corrida 23505 pela fila: a nova tentativa grava a inbox de novo (rollback desfez a primeira)", async () => {
+    const c = command();
+    const winner = WagerTransaction.create({
+      id: "winner-tx",
+      providerId: c.providerId,
+      externalTransactionId: c.externalTransactionId,
+      idempotencyKey: c.idempotencyKey,
+      payloadHash: payloadHash(c),
+      walletId,
+      playerId: PLAYER,
+      roundId: "round-1",
+      gameId: "game-1",
+      kind: "BET",
+      money: brl("80.00"),
+      correlationId: "other",
+      createdAt: NOW,
+    });
+    winner.markProcessed({ resultBalance: brl("20.00"), at: NOW });
+    store.raceWinner = winner;
+    const res = await viaQueue(c, "msg-race");
+    expect(store.runs).toBe(2);
+    expect(res).toMatchObject({ transactionId: "winner-tx", idempotentReplay: true });
+    expect(store.inbox.map((m) => [m.messageId, m.isProcessed()])).toEqual([["msg-race", true]]);
   });
 });

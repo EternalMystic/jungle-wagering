@@ -36,6 +36,14 @@ export class IdempotencyConflictError extends ApplicationError {
   readonly code = "IDEMPOTENCY_CONFLICT";
 }
 
+/**
+ * O mesmo `messageId` da fila chegou com OUTRO payload (D9): não é redelivery, é veneno.
+ * Permanente — vai para a DLQ, nada é confirmado.
+ */
+export class InboxPayloadMismatchError extends ApplicationError {
+  readonly code = "INBOX_PAYLOAD_MISMATCH";
+}
+
 /** Infra temporariamente indisponível (lock_timeout, conexão, pool). Reenviar com a mesma key. */
 export class TransientInfrastructureError extends ApplicationError {
   readonly code = "TEMPORARILY_UNAVAILABLE";

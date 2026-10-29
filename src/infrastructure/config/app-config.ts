@@ -27,9 +27,35 @@ export interface AppConfig {
   readonly dbPoolMax: number;
   /** `lock_timeout` de cada transação (D3); > 3 s exigido pelos testes de disputa (D16). */
   readonly lockTimeoutMs: number;
+  /** Prazo para abrir uma conexão nova com o Postgres. */
+  readonly dbConnectTimeoutMs: number;
+  /** Prazo para obter conexão do pool (pool cheio ou banco inalcançável → transitório). */
+  readonly dbAcquireTimeoutMs: number;
+  /**
+   * Socket do Postgres sem tráfego por mais que isto é destruído (D21): banco congelado não
+   * pode segurar uma transação aberta para sempre. Tem de ser > `lockTimeoutMs`.
+   */
+  readonly dbSocketTimeoutMs: number;
+  readonly consumer: ConsumerConfig;
   readonly nodeEnv: string | undefined;
   /** `FAULT_POINT` (D20): só tem efeito com `NODE_ENV=test`; nome desconhecido é erro de config. */
   readonly faultPoint: FaultPoint | undefined;
+}
+
+/** Consumer da fila de entrada (D9). */
+export interface ConsumerConfig {
+  readonly enabled: boolean;
+  /** Long polling do ReceiveMessage. */
+  readonly waitTimeSeconds: number;
+  /** Mensagens por ReceiveMessage (1..10). */
+  readonly maxMessages: number;
+  /** Visibilidade renovada (heartbeat) enquanto a mensagem é processada. */
+  readonly visibilityTimeoutSeconds: number;
+  /** Backoff de transitórios: `min(base · 2^(n−1), max)` com n = ApproximateReceiveCount. */
+  readonly retryBaseSeconds: number;
+  readonly retryMaxSeconds: number;
+  /** SIGTERM: prazo para concluir as mensagens em andamento antes de devolvê-las. */
+  readonly shutdownGraceMs: number;
 }
 
 export const DEFAULT_DATABASE_URL = "postgres://postgres:postgres@localhost:55432/wagering";
@@ -86,7 +112,37 @@ function faultPoint(env: Env): FaultPoint | undefined {
   return raw;
 }
 
+function bool(env: Env, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  throw new InvalidConfigError(`${key} deve ser true/false`);
+}
+
+function consumerConfig(env: Env): ConsumerConfig {
+  const retryBaseSeconds = positiveInt(env, "SQS_RETRY_BASE_SECONDS", 2, 3600);
+  const retryMaxSeconds = positiveInt(env, "SQS_RETRY_MAX_SECONDS", 60, 43_200);
+  if (retryMaxSeconds < retryBaseSeconds) {
+    throw new InvalidConfigError("SQS_RETRY_MAX_SECONDS deve ser ≥ SQS_RETRY_BASE_SECONDS");
+  }
+  return {
+    enabled: bool(env, "SQS_CONSUMER_ENABLED", true),
+    waitTimeSeconds: positiveInt(env, "SQS_WAIT_TIME_SECONDS", 20, 20),
+    maxMessages: positiveInt(env, "SQS_MAX_MESSAGES", 10, 10),
+    visibilityTimeoutSeconds: positiveInt(env, "SQS_VISIBILITY_TIMEOUT_SECONDS", 30, 43_200),
+    retryBaseSeconds,
+    retryMaxSeconds,
+    shutdownGraceMs: positiveInt(env, "SQS_SHUTDOWN_GRACE_MS", 8000, 600_000),
+  };
+}
+
 export function loadConfig(env: Env = process.env): AppConfig {
+  const lockTimeoutMs = positiveInt(env, "LOCK_TIMEOUT_MS", 5000, 600000);
+  const dbSocketTimeoutMs = positiveInt(env, "DB_SOCKET_TIMEOUT_MS", 15_000, 600_000);
+  if (dbSocketTimeoutMs <= lockTimeoutMs) {
+    throw new InvalidConfigError("DB_SOCKET_TIMEOUT_MS deve ser > LOCK_TIMEOUT_MS (esperar um lock não é banco congelado)");
+  }
   return {
     databaseUrl: url(env, "DATABASE_URL", DEFAULT_DATABASE_URL, ["postgres:", "postgresql:"]),
     aws: {
@@ -103,7 +159,11 @@ export function loadConfig(env: Env = process.env): AppConfig {
     httpPort: positiveInt(env, "PORT", 3000, 65535),
     readinessTimeoutMs: positiveInt(env, "READINESS_TIMEOUT_MS", 2000, 60000),
     dbPoolMax: positiveInt(env, "DB_POOL_MAX", 20, 1000),
-    lockTimeoutMs: positiveInt(env, "LOCK_TIMEOUT_MS", 5000, 600000),
+    lockTimeoutMs,
+    dbConnectTimeoutMs: positiveInt(env, "DB_CONNECT_TIMEOUT_MS", 5000, 600_000),
+    dbAcquireTimeoutMs: positiveInt(env, "DB_ACQUIRE_TIMEOUT_MS", 10_000, 600_000),
+    dbSocketTimeoutMs,
+    consumer: consumerConfig(env),
     nodeEnv: env.NODE_ENV?.trim() || undefined,
     faultPoint: faultPoint(env),
   };

@@ -5,9 +5,63 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 05 — FaultInjector + harness multi-processo (feita; portão rodado pelo agente, a confirmar pelo orquestrador)
-- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3)
-- Sabotagens comprovadas (`/prove-red`): linhas 2 e 3 (abaixo)
+- Fase atual: 06 — Consumer SQS + inbox (implementada; portão desta sessão NÃO passou, bloqueios abaixo)
+- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3), 05 (364aeb7)
+- Sabotagens comprovadas (`/prove-red`): linhas 2, 3 e 11 (abaixo)
+
+## Revalidação da fase 06 — 2026-10-29 (sessão atual)
+
+- Revisados consumer, parser/classificação, lifecycle, inbox/use case e repositórios; nenhuma
+  fase posterior iniciada. Nenhum commit e nenhum arquivo congelado alterado.
+- Corrigidos dois erros reais de typecheck nos testes novos: comparação heterogênea com hash
+  opcional e fixture `Wallet.open` sem os IDs obrigatórios da abertura. Asserções preservadas
+  e reforçadas com existência da transação e cardinalidade da inbox; domínio intacto.
+- Portão executado pelo agente nesta sessão:
+  | Comando | Saída / resultado |
+  |---|---|
+  | `docker compose up -d --wait` | exit 1: `permission denied` no pipe `dockerDesktopLinuxEngine` |
+  | `bun run scripts/scan-forbidden.ts` | exit 1: `EPERM ... uv_spawn 'git'` |
+  | `bun run typecheck` | VERDE após correção das fixtures (`tsc --noEmit`, exit 0) |
+  | `bun run test:unit` | 280 pass / 1 fail: subprocesso do FaultInjector bloqueado por `EPERM ... uv_spawn ... bun.exe` |
+  | `bun run test:acceptance` | 22 pass / 1 fail no setup HTTP: `Bun.spawn` bloqueado por EPERM |
+  | `bun run test:integration` | 15 pass / 2 fail nos setups SQS consumer e HTTP: `Bun.spawn` bloqueado por EPERM |
+- Extra: `bun run lint` VERDE (92 arquivos). PG 16 e emulador SQS já ativos estavam acessíveis:
+  schema/constraints, migrations round-trip, health e FIFO/redrive passaram; invariantes dos
+  casos executados vazias. Os casos da fase 06 com processos reais NÃO executaram nesta sessão.
+- Varredura suplementar por `Bun.Glob` (mesmo `checkText` do hook, sem subprocesso):
+  87 arquivos, zero violações, incluindo arquivos novos. Não substitui o comando do portão.
+  `git diff --check` limpo; diff vazio em todos os caminhos congelados.
+- Pendente: reexecutar o portão em ambiente que permita Docker e subprocessos Bun/Git.
+  Não substituir processos por mocks nem afrouxar testes para contornar o ambiente (D21).
+  Os relatos de verde e sabotagem abaixo pertencem à execução anterior; não são prova atual.
+
+## Fase 06 — feito (decisões em D21)
+
+- Inbox no use case: `execute(command, delivery?)`; lock da wallet → `INSERT … ON CONFLICT DO
+  NOTHING` → decisão → `processed_at` → `before-commit` → COMMIT. Redelivery = resultado original
+  por `(provider, external)`+hash; mesmo messageId com outro payload = `InboxPayloadMismatchError`.
+  `InboxRepository` (porta) + `SqlInboxRepository`; mapper `inboxFromRecord`.
+- `src/interface/sqs/`: parser §10 (mesma validação do DTO HTTP), `retry-policy.ts`
+  (negócio/transitório/permanente + backoff), `wager-consumer.ts` (grupos FIFO em paralelo,
+  sequência no grupo, heartbeat, DLQ explícita com `reason`, retry por visibilidade, drain).
+  Logger JSON mínimo (`src/infrastructure/logging/json-logger.ts`) até o pino (S9).
+- Config nova: `SQS_CONSUMER_ENABLED`, `SQS_WAIT_TIME_SECONDS`, `SQS_MAX_MESSAGES`,
+  `SQS_VISIBILITY_TIMEOUT_SECONDS`, `SQS_RETRY_BASE_SECONDS`, `SQS_RETRY_MAX_SECONDS`,
+  `SQS_SHUTDOWN_GRACE_MS`, `DB_CONNECT_TIMEOUT_MS`, `DB_ACQUIRE_TIMEOUT_MS`, `DB_SOCKET_TIMEOUT_MS`
+  (> `LOCK_TIMEOUT_MS`, validado). Socket do pg com prazo de inatividade: Postgres congelado
+  não segura transação nem reusa conexão meio-aberta (D21).
+- Testes: U `process-wager-transaction` (+8 casos de inbox), U `sqs-message-and-retry-policy`
+  (parser, classificação, backoff), U `wager-consumer-drain` (SIGTERM não é capturável no
+  Windows — drain provado com SQS falso). I `sqs-consumer` (7 casos, processo real + PG + MiniStack):
+  §10 feliz, redelivery 3×, negócio → ack, 4 permanentes → DLQ no 1º recebimento com motivo,
+  lock preso → 5 recebimentos → DLQ pela redrive, `docker compose pause/unpause` → retry
+  transitório → 1 efeito, SIGKILL after-commit-before-ack → reentrega = replay. Rodado 3× verde.
+- C `crash-after-commit` › SQS agora VERDE (3/3).
+- Achado durante os testes: a 1ª versão do replay da inbox buscava pela key e, com outra key,
+  devolveria WALLET_NOT_FOUND em vez do original — corrigido (busca por `(provider, external)`).
+- TDD: implementação veio antes dos testes nesta fase (vermelho antes do verde NÃO mostrado);
+  compensado com `/prove-red` manual da linha 11: `DeleteMessage` antes do `execute` →
+  I `SIGKILL em after-commit-before-ack` VERMELHO (`queueDepth` 0 ≠ 1); arquivo restaurado.
 
 ## Sabotagens comprovadas
 
@@ -177,10 +231,12 @@ transação (404 nos testes HTTP). Decisões novas: D16 em `docs/DECISOES.md`.
 
 ## Próxima ação
 
-- Orquestrador roda o portão da fase 05.
-- Próxima fase (PLANO S6): consumer SQS + inbox. Inserir a inbox no passo 2 de
-  `ProcessWagerTransaction.attempt` (depois do lock, antes da busca por key); chamar
-  `FaultPoint.AfterCommitBeforeAck` antes do `DeleteMessage`. Meta: `crash-after-commit` › SQS verde.
-  Ainda pendente: `/prove-red` das linhas 7, 8, 19.
-- Nota de ambiente (2026-10-29): `docker`/`bun`/`tsc` funcionaram nesta sessão; worktree fora do
+- Orquestrador reexecuta o portão da fase 06 com acesso ao Docker e criação de subprocessos;
+  nesta sessão o portão não passou (detalhes no início deste documento).
+- Próxima fase (PLANO S7): outbox publisher (D10/D20: `INSTANCE_ID` em `locked_by`, pontos
+  `after-claim-before-publish`/`after-publish-before-mark`) e worker de PENDING_REFERENCE + resolução
+  ansiosa (D8). Usar o `JsonLogger`. Ainda pendente: `/prove-red` das linhas 7, 8, 12, 19.
+- Atenção: o teste de pausa do Postgres (`docker compose pause postgres`) congela o banco de
+  TODOS — não rodar suítes em paralelo com `test:integration`.
+- Nota de ambiente da execução anterior (2026-10-29): `docker`/`bun`/`tsc` funcionaram naquela sessão; worktree fora do
   projeto é bloqueado pelo sandbox — usar `.scratch/` (removido no fim).

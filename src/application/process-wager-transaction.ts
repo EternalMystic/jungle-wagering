@@ -7,11 +7,18 @@ import {
 } from "../domain/events/wager-transaction-events";
 import { WalletBalanceChanged } from "../domain/events/wallet-balance-changed";
 import { BusinessFailureCode, type FailureCode } from "../domain/failure-codes";
+import { InboxMessage } from "../domain/inbox-message";
 import type { Money } from "../domain/money";
 import { OutboxMessage } from "../domain/outbox-message";
 import { payloadHash } from "../domain/payload-hash";
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../domain/wager-transaction";
-import { IdempotencyConflictError, IdempotencyRaceLostError, InvalidCommandError } from "./errors";
+import type { Wallet } from "../domain/wallet";
+import {
+  IdempotencyConflictError,
+  IdempotencyRaceLostError,
+  InboxPayloadMismatchError,
+  InvalidCommandError,
+} from "./errors";
 import type { Clock } from "./ports/clock";
 import { type FaultInjector, FaultPoint, NO_FAULTS } from "./ports/fault-injector";
 import type { IdGenerator } from "./ports/id-generator";
@@ -46,6 +53,15 @@ export interface WagerResult {
   readonly idempotentReplay: boolean;
 }
 
+/**
+ * De onde veio o comando quando a entrada é a fila (§10). Com ela, o use case grava a inbox
+ * `(consumerName, messageId)` na MESMA transação do efeito; sem ela (HTTP), não há inbox.
+ */
+export interface QueueDelivery {
+  readonly consumerName: string;
+  readonly messageId: string;
+}
+
 /** Primeira nova tentativa de resolver uma referência ausente (D8: 5 s · 2^n, teto 5 min). */
 export const REFERENCE_FIRST_RETRY_MS = 5_000;
 
@@ -55,7 +71,8 @@ const MAX_ATTEMPTS = 3;
 /**
  * Caminho crítico (CLAUDE.md, "Contrato transacional"): uma transação SQL curta por tentativa —
  *   1. `SELECT … FOR UPDATE` na wallet (lock POR WALLET; wallets diferentes seguem em paralelo);
- *   2. (inbox — entra com o consumidor SQS);
+ *   2. inbox (só SQS): `INSERT … ON CONFLICT DO NOTHING`; já existia → replay (mesmo hash) ou
+ *      veneno (`InboxPayloadMismatchError`); a linha é marcada processada no mesmo commit;
  *   3. busca por `idempotency_key`: mesmo hash → replay do resultado ORIGINAL; outro → conflito;
  *      mesmo (provider, external) com outra key → conflito;
  *   4. decisão no domínio; INSERT da transação; UPDATE condicionado da wallet; INSERT do ledger;
@@ -72,7 +89,7 @@ export class ProcessWagerTransaction {
     private readonly faults: FaultInjector = NO_FAULTS,
   ) {}
 
-  async execute(command: WagerCommand): Promise<WagerResult> {
+  async execute(command: WagerCommand, delivery?: QueueDelivery): Promise<WagerResult> {
     if (command.kind === WagerTransactionKind.Opening) {
       throw new InvalidCommandError("OPENING is internal and cannot be submitted");
     }
@@ -108,6 +125,7 @@ export class ProcessWagerTransaction {
     // valida o comando ANTES de abrir transação: entrada inválida nunca toma lock
     try {
       build(this.clock.now());
+      if (delivery !== undefined) this.receiveInbox(delivery, hash);
     } catch (error) {
       if (error instanceof DomainError) throw new InvalidCommandError(error.message);
       throw error;
@@ -115,7 +133,9 @@ export class ProcessWagerTransaction {
 
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.uow.run((repositories) => this.attempt(repositories, command, hash, build));
+        return await this.uow.run((repositories) =>
+          this.attempt(repositories, command, hash, build, delivery && this.receiveInbox(delivery, hash)),
+        );
       } catch (error) {
         if (error instanceof IdempotencyRaceLostError && attempt < MAX_ATTEMPTS) continue;
         throw error;
@@ -128,11 +148,57 @@ export class ProcessWagerTransaction {
     command: WagerCommand,
     hash: string,
     build: (at: Date) => WagerTransaction,
+    inbox: InboxMessage | undefined,
   ): Promise<WagerResult> {
-    const { wallets, transactions, ledger, outbox } = repositories;
+    const { wallets, transactions } = repositories;
 
-    // 1. lock POR WALLET — antes de qualquer leitura de transação (ordem wallet → transações)
+    // 1. lock POR WALLET — antes de qualquer leitura/escrita de inbox ou transação
+    //    (ordem wallet → demais linhas)
     const wallet = await wallets.lockById(command.walletId);
+
+    // 2. inbox: redelivery de mensagem já confirmada não decide nada de novo
+    if (inbox !== undefined) {
+      const previous = await repositories.inbox.insertIfAbsent(inbox);
+      if (previous !== undefined) {
+        if (!previous.matchesPayload(hash)) {
+          throw new InboxPayloadMismatchError(
+            `message ${inbox.consumerName}/${inbox.messageId} was already received with a different payload`,
+          );
+        }
+        return this.redelivered(repositories, command, hash);
+      }
+    }
+
+    const { result, wrote } = await this.decide(repositories, command, hash, build, wallet);
+    if (inbox !== undefined) {
+      inbox.markProcessed(this.clock.now());
+      await repositories.inbox.markProcessed(inbox);
+    }
+    if (wrote) this.faults.checkpoint(FaultPoint.BeforeCommit);
+    return result;
+  }
+
+  /**
+   * A inbox diz que esta mensagem já foi confirmada (inbox e efeito saem no mesmo commit):
+   * devolve o resultado ORIGINAL sem decidir de novo. O original é achado pela identidade de
+   * negócio `(provider, external)` com o mesmo hash (a key não entra no hash, D4). Sem ele, o
+   * original foi a única rejeição não persistida (WALLET_NOT_FOUND, D6) — e continua sendo, mesmo
+   * que a wallet tenha sido criada depois: mensagem tratada não é reprocessada.
+   */
+  private async redelivered(repositories: TransactionalRepositories, command: WagerCommand, hash: string): Promise<WagerResult> {
+    const original = await repositories.transactions.findByProviderExternalId(command.providerId, command.externalTransactionId);
+    if (original?.matchesPayload(hash)) return resultOf(original, true);
+    return { ...walletNotFound(), idempotentReplay: true };
+  }
+
+  private async decide(
+    repositories: TransactionalRepositories,
+    command: WagerCommand,
+    hash: string,
+    build: (at: Date) => WagerTransaction,
+    wallet: Wallet | undefined,
+  ): Promise<{ result: WagerResult; wrote: boolean }> {
+    const { wallets, transactions, ledger, outbox } = repositories;
 
     // 3. idempotência persistente
     const existing = await transactions.findByIdempotencyKey(command.idempotencyKey);
@@ -140,7 +206,7 @@ export class ProcessWagerTransaction {
       if (!existing.matchesPayload(hash)) {
         throw new IdempotencyConflictError(`Idempotency-Key ${command.idempotencyKey} was already used with a different payload`);
       }
-      return resultOf(existing, true);
+      return { result: resultOf(existing, true), wrote: false };
     }
     const sameOperation = await transactions.findByProviderExternalId(command.providerId, command.externalTransactionId);
     if (sameOperation !== undefined) {
@@ -149,15 +215,7 @@ export class ProcessWagerTransaction {
       );
     }
 
-    if (wallet === undefined) {
-      return {
-        transactionId: undefined,
-        status: WagerTransactionStatus.Rejected,
-        balance: undefined,
-        failureCode: BusinessFailureCode.WalletNotFound,
-        idempotentReplay: false,
-      };
-    }
+    if (wallet === undefined) return { result: walletNotFound(), wrote: false };
 
     // 4. decisão de negócio sob o lock
     const at = this.clock.now();
@@ -201,9 +259,27 @@ export class ProcessWagerTransaction {
 
     // 5. outbox no mesmo commit
     for (const event of events) await outbox.add(OutboxMessage.enqueue(event));
-    this.faults.checkpoint(FaultPoint.BeforeCommit);
-    return resultOf(tx, false);
+    return { result: resultOf(tx, false), wrote: true };
   }
+
+  private receiveInbox(delivery: QueueDelivery, hash: string): InboxMessage {
+    return InboxMessage.receive({
+      consumerName: delivery.consumerName,
+      messageId: delivery.messageId,
+      payloadHash: hash,
+      receivedAt: this.clock.now(),
+    });
+  }
+}
+
+function walletNotFound(): WagerResult {
+  return {
+    transactionId: undefined,
+    status: WagerTransactionStatus.Rejected,
+    balance: undefined,
+    failureCode: BusinessFailureCode.WalletNotFound,
+    idempotentReplay: false,
+  };
 }
 
 function resultOf(tx: WagerTransaction, idempotentReplay: boolean): WagerResult {
