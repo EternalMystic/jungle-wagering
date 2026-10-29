@@ -1,3 +1,5 @@
+import { type FaultPoint, isFaultPoint } from "../../application/ports/fault-injector";
+
 /**
  * Configuração do processo, lida do ambiente uma única vez na borda.
  * Defaults apontam para o docker-compose.yml local (Postgres na 55432, emulador SQS na 4566).
@@ -25,6 +27,9 @@ export interface AppConfig {
   readonly dbPoolMax: number;
   /** `lock_timeout` de cada transação (D3); > 3 s exigido pelos testes de disputa (D16). */
   readonly lockTimeoutMs: number;
+  readonly nodeEnv: string | undefined;
+  /** `FAULT_POINT` (D20): só tem efeito com `NODE_ENV=test`; nome desconhecido é erro de config. */
+  readonly faultPoint: FaultPoint | undefined;
 }
 
 export const DEFAULT_DATABASE_URL = "postgres://postgres:postgres@localhost:55432/wagering";
@@ -74,6 +79,13 @@ function fifoName(env: Env, key: string, fallback: string): string {
   return value;
 }
 
+function faultPoint(env: Env): FaultPoint | undefined {
+  const raw = env.FAULT_POINT?.trim();
+  if (!raw) return undefined;
+  if (!isFaultPoint(raw)) throw new InvalidConfigError(`FAULT_POINT desconhecido: ${raw}`);
+  return raw;
+}
+
 export function loadConfig(env: Env = process.env): AppConfig {
   return {
     databaseUrl: url(env, "DATABASE_URL", DEFAULT_DATABASE_URL, ["postgres:", "postgresql:"]),
@@ -92,5 +104,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
     readinessTimeoutMs: positiveInt(env, "READINESS_TIMEOUT_MS", 2000, 60000),
     dbPoolMax: positiveInt(env, "DB_POOL_MAX", 20, 1000),
     lockTimeoutMs: positiveInt(env, "LOCK_TIMEOUT_MS", 5000, 600000),
+    nodeEnv: env.NODE_ENV?.trim() || undefined,
+    faultPoint: faultPoint(env),
   };
 }

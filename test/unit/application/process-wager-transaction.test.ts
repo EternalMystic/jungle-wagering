@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { IdempotencyConflictError, IdempotencyRaceLostError, InvalidCommandError } from "../../../src/application/errors";
 import { OpenWallet } from "../../../src/application/open-wallet";
+import { type FaultInjector, FaultPoint } from "../../../src/application/ports/fault-injector";
 import type { TransactionalRepositories, UnitOfWork } from "../../../src/application/ports/unit-of-work";
 import {
   ProcessWagerTransaction,
@@ -307,5 +308,44 @@ describe("ProcessWagerTransaction — reversões e referência fora de ordem (D7
     const res = await submit(command({ externalTransactionId: "rb-1", kind: "ROLLBACK", money: brl("50.00"), referenceExternalTransactionId: "win-1" }));
     expect(res).toMatchObject({ status: "REJECTED", failureCode: "REVERSAL_INSUFFICIENT_FUNDS" });
     expect(store.transactions.find((t) => t.externalTransactionId === "rb-1")?.status).toBe("REJECTED");
+  });
+});
+
+describe("ProcessWagerTransaction — FaultInjector (D20)", () => {
+  class RecordingFaults implements FaultInjector {
+    readonly seen: { point: FaultPoint; transactions: number; outbox: number; runs: number }[] = [];
+    constructor(private readonly s: FakeStore) {}
+    checkpoint(point: FaultPoint): void {
+      this.seen.push({ point, transactions: this.s.transactions.length, outbox: this.s.outbox.length, runs: this.s.runs });
+    }
+  }
+
+  test("before-commit: dentro da transação, depois de TODAS as escritas (transação, ledger, outbox)", async () => {
+    const faults = new RecordingFaults(store);
+    const before = { transactions: store.transactions.length, outbox: store.outbox.length };
+    await new ProcessWagerTransaction(store.uow(), clock, ids, faults).execute(command());
+    expect(faults.seen).toEqual([
+      { point: "before-commit", transactions: before.transactions + 1, outbox: before.outbox + 2, runs: store.runs },
+    ]);
+  });
+
+  test("before-commit que aborta ⇒ nada confirmado (é o ponto de um SIGKILL antes do COMMIT)", async () => {
+    const abort: FaultInjector = {
+      checkpoint: (point) => {
+        if (point === FaultPoint.BeforeCommit) throw new Error("killed");
+      },
+    };
+    const snapshot = { t: store.transactions.length, l: store.ledger.length, o: store.outbox.length };
+    await expect(new ProcessWagerTransaction(store.uow(), clock, ids, abort).execute(command())).rejects.toThrow("killed");
+    expect({ t: store.transactions.length, l: store.ledger.length, o: store.outbox.length }).toEqual(snapshot);
+    expect(store.wallets[0]?.balance.toString()).toBe("100.00");
+  });
+
+  test("replay não passa pelo before-commit (nada a confirmar)", async () => {
+    await submit(command());
+    const faults = new RecordingFaults(store);
+    const res = await new ProcessWagerTransaction(store.uow(), clock, ids, faults).execute(command());
+    expect(res.idempotentReplay).toBe(true);
+    expect(faults.seen).toEqual([]);
   });
 });

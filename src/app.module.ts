@@ -1,6 +1,7 @@
 import { type DynamicModule, Inject, Injectable, Module, type OnApplicationShutdown } from "@nestjs/common";
 import type { SQSClient } from "@aws-sdk/client-sqs";
 import { OpenWallet } from "./application/open-wallet";
+import type { FaultInjector } from "./application/ports/fault-injector";
 import type { UnitOfWork } from "./application/ports/unit-of-work";
 import { ProcessWagerTransaction } from "./application/process-wager-transaction";
 import { WageringQueries } from "./application/wagering-queries";
@@ -9,11 +10,18 @@ import { PostgresReadinessProbe, SqsReadinessProbe } from "./infrastructure/heal
 import { MikroOrmUnitOfWork } from "./infrastructure/persistence/mikro-orm-unit-of-work";
 import type { Orm } from "./infrastructure/persistence/orm";
 import { initOrm } from "./infrastructure/persistence/orm";
+import { createFaultInjector } from "./infrastructure/faults/process-kill-fault-injector";
 import { createSqsClient } from "./infrastructure/sqs/sqs-client";
 import { SystemClock, UuidV7Generator } from "./infrastructure/system";
 import { HealthController } from "./interface/http/health/health.controller";
 import { READINESS_PROBES, READINESS_TIMEOUT_MS } from "./interface/http/health/tokens";
-import { ID_GENERATOR, OPEN_WALLET, PROCESS_WAGER_TRANSACTION, WAGERING_QUERIES } from "./interface/http/wagering/tokens";
+import {
+  FAULT_INJECTOR,
+  ID_GENERATOR,
+  OPEN_WALLET,
+  PROCESS_WAGER_TRANSACTION,
+  WAGERING_QUERIES,
+} from "./interface/http/wagering/tokens";
 import { WageringController } from "./interface/http/wagering/wagering.controller";
 import { WalletsController } from "./interface/http/wagering/wallets.controller";
 
@@ -68,6 +76,7 @@ export class AppModule {
         { provide: UNIT_OF_WORK, inject: [ORM], useFactory: (orm: Orm) => new MikroOrmUnitOfWork(orm, config.lockTimeoutMs) },
         { provide: CLOCK, useValue: new SystemClock() },
         { provide: ID_GENERATOR, useValue: new UuidV7Generator() },
+        { provide: FAULT_INJECTOR, useValue: createFaultInjector(config.nodeEnv, config.faultPoint) },
         {
           provide: OPEN_WALLET,
           inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR],
@@ -75,8 +84,9 @@ export class AppModule {
         },
         {
           provide: PROCESS_WAGER_TRANSACTION,
-          inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR],
-          useFactory: (uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator) => new ProcessWagerTransaction(uow, clock, ids),
+          inject: [UNIT_OF_WORK, CLOCK, ID_GENERATOR, FAULT_INJECTOR],
+          useFactory: (uow: UnitOfWork, clock: SystemClock, ids: UuidV7Generator, faults: FaultInjector) =>
+            new ProcessWagerTransaction(uow, clock, ids, faults),
         },
         { provide: WAGERING_QUERIES, inject: [UNIT_OF_WORK], useFactory: (uow: UnitOfWork) => new WageringQueries(uow) },
         InfrastructureLifecycle,

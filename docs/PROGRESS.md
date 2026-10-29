@@ -5,8 +5,8 @@ próxima ação. Curto. A sessão seguinte lê isto primeiro.
 
 ## Estado
 
-- Fase atual: 04 — use cases + HTTP (feita; portão rodado pelo agente, a confirmar pelo orquestrador)
-- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b)
+- Fase atual: 05 — FaultInjector + harness multi-processo (feita; portão rodado pelo agente, a confirmar pelo orquestrador)
+- Portões verdes: 01 (aa86d5b), 02 (89ea165), 02r (722336c), 03 (bd7244b), 04 (63b60c3)
 - Sabotagens comprovadas (`/prove-red`): linhas 2 e 3 (abaixo)
 
 ## Sabotagens comprovadas
@@ -19,6 +19,34 @@ sabotagem só em produção/migration, teste de aceitação intocado; worktree e
 | 2 (sem lost update) | `lockById`: `… FOR UPDATE` → `SELECT` simples | A `§8 … duas BETs de 80.00` | VERMELHO: `statuses` = `[200, 500]` ≠ `[200, 422]`. O perdedor leu 100.00 sem lock, decidiu debitar e o UPDATE condicionado (`version = 1`) casou 0 linhas → `LostUpdateError`. Saldo seguiu correto (defesa em profundidade), mas a garantia de negócio caiu. Controle sem sabotagem: verde. |
 | 3 (sem duplicata) | sem `findByIdempotencyKey` + sem `uq_tx_idempotency_key` na migration | A `mesma BET 50×` | VERMELHO: 49 × `409` em vez de replays (a camada 2 de D4, `(provider, external)`, ainda barrou o débito). |
 | 3 (variante forte) | acima + sem `findByProviderExternalId` + sem `uq_tx_provider_external` | A `mesma BET 50×` e `10 keys diferentes` | VERMELHO: `originals` com 50 (50 débitos), e `[200×10]` em vez de `[200, 409×9]`. |
+
+## Fase 05 — feito (decisões em D20)
+
+- Porta `src/application/ports/fault-injector.ts` (4 pontos nomeados, `NO_FAULTS`) e
+  `src/infrastructure/faults/process-kill-fault-injector.ts` (arma só com `NODE_ENV=test` +
+  `FAULT_POINT`; SIGKILL no próprio pid). `FAULT_POINT` inválido → erro de config.
+  Ligado hoje: `before-commit` (fim de `ProcessWagerTransaction.attempt`, dentro da transação) e
+  `after-commit-before-ack` (controller HTTP, antes da resposta). Faltam: consumer (S6) chamar
+  `after-commit-before-ack` antes do `DeleteMessage`; publisher (S7) chamar
+  `after-claim-before-publish` / `after-publish-before-mark` e honrar o contrato de D20
+  (corpo = envelope; `locked_by` = `INSTANCE_ID`, mantido após publicar).
+- Harness `test/support/cluster.ts` (N processos reais, portas distintas, mesmo banco/filas,
+  ready, kill/stop/restart/restartAll, waitForExit, sendWagerMessage, queueDepth, `eventually`)
+  e `test/support/db-queries.ts`. `app-process.ts` só passou a exportar `freePort`/`tail`.
+- Testes unitários: `test/unit/fault-injector.test.ts` (inclui SIGKILL real em subprocesso) e
+  3 casos novos em `process-wager-transaction.test.ts` (ponto dentro da transação, abortar ⇒ nada
+  confirmado, replay não passa pelo ponto). Escritos junto da implementação — o vermelho
+  antes do verde NÃO foi mostrado para estes.
+- `test/concurrency/` (§13 concorrência 1–8), resultado local:
+  | Arquivo | § | Estado |
+  |---|---|---|
+  | `http-races` | 1, 2, 3 | VERDE (BET 50× em 3 processos com 50 backends no lock; §8 entre instâncias; 29 wallets terminam com 1 travada) |
+  | `multi-instance` | 4 | VERDE (252 envios, 51+ backends bloqueados juntos = 3 processos no banco) |
+  | `crash-after-commit` | 5 | HTTP before-commit e after-commit-before-ack VERDES; **SQS VERMELHO** (instância não morre: sem consumer — S6) |
+  | `outbox-publishers` | 6 | **VERMELHO** ×3 (nada publica — S7) |
+  | `out-of-order-reference` | 7 | **VERMELHO** ×3 (PENDING_REFERENCE nunca resolvido — S7; a corrida aparece: parte dos ROLLBACKs PROCESSED, parte pendente) |
+  | `restart-consistency` | 8 | VERDE (SIGKILL nas 3 com 60 transações abertas, processos novos, reenvio) |
+- Não rodado nesta fase: `/prove-red` (linhas 11, 12, 14, 15, 17 ficam para o portão do Dia 2).
 
 ## Fase 04 — feito (decisões em D19)
 
@@ -149,9 +177,10 @@ transação (404 nos testes HTTP). Decisões novas: D16 em `docs/DECISOES.md`.
 
 ## Próxima ação
 
-- Orquestrador roda o portão da fase 04 (o agente rodou todos os comandos; saída no fim da sessão).
-- Próxima fase (PLANO S5): FaultInjector + harness multi-processo + testes de concorrência §13.
-  Ao ligar o consumer SQS, inserir a inbox no passo 2 de `ProcessWagerTransaction.attempt`
-  (depois do lock, antes da busca por key). Ainda pendente: `/prove-red` das linhas 7, 8, 19.
+- Orquestrador roda o portão da fase 05.
+- Próxima fase (PLANO S6): consumer SQS + inbox. Inserir a inbox no passo 2 de
+  `ProcessWagerTransaction.attempt` (depois do lock, antes da busca por key); chamar
+  `FaultPoint.AfterCommitBeforeAck` antes do `DeleteMessage`. Meta: `crash-after-commit` › SQS verde.
+  Ainda pendente: `/prove-red` das linhas 7, 8, 19.
 - Nota de ambiente (2026-10-29): `docker`/`bun`/`tsc` funcionaram nesta sessão; worktree fora do
   projeto é bloqueado pelo sandbox — usar `.scratch/` (removido no fim).

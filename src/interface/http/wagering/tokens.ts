@@ -2,3 +2,4 @@ export const OPEN_WALLET = Symbol("OPEN_WALLET");
 export const PROCESS_WAGER_TRANSACTION = Symbol("PROCESS_WAGER_TRANSACTION");
 export const WAGERING_QUERIES = Symbol("WAGERING_QUERIES");
 export const ID_GENERATOR = Symbol("ID_GENERATOR");
+export const FAULT_INJECTOR = Symbol("FAULT_INJECTOR");

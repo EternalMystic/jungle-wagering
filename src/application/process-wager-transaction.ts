@@ -13,6 +13,7 @@ import { payloadHash } from "../domain/payload-hash";
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../domain/wager-transaction";
 import { IdempotencyConflictError, IdempotencyRaceLostError, InvalidCommandError } from "./errors";
 import type { Clock } from "./ports/clock";
+import { type FaultInjector, FaultPoint, NO_FAULTS } from "./ports/fault-injector";
 import type { IdGenerator } from "./ports/id-generator";
 import type { TransactionalRepositories, UnitOfWork } from "./ports/unit-of-work";
 import { decideWager } from "./wager-rules";
@@ -68,6 +69,7 @@ export class ProcessWagerTransaction {
     private readonly uow: UnitOfWork,
     private readonly clock: Clock,
     private readonly ids: IdGenerator,
+    private readonly faults: FaultInjector = NO_FAULTS,
   ) {}
 
   async execute(command: WagerCommand): Promise<WagerResult> {
@@ -199,6 +201,7 @@ export class ProcessWagerTransaction {
 
     // 5. outbox no mesmo commit
     for (const event of events) await outbox.add(OutboxMessage.enqueue(event));
+    this.faults.checkpoint(FaultPoint.BeforeCommit);
     return resultOf(tx, false);
   }
 }

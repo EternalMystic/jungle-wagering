@@ -22,7 +22,7 @@ const READY_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 10_000;
 const LOG_TAIL_LINES = 200;
 
-async function freePort(): Promise<number> {
+export async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
     srv.once("error", reject);
@@ -40,7 +40,7 @@ async function freePort(): Promise<number> {
 }
 
 /** Consome um stream do processo (sem isso o pipe enche e o filho trava) guardando a cauda. */
-function tail(stream: ReadableStream<Uint8Array>, lines: string[]): Promise<void> {
+export function tail(stream: ReadableStream<Uint8Array>, lines: string[]): Promise<void> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
   return (async () => {

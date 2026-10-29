@@ -317,3 +317,35 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   invariantes I6/I7 isentam OPENING, mas consumidores do saldo precisam do primeiro movimento.
 - **Consultas**: `GET /wallets/:id`, `GET /wagering/transactions/:id`,
   `GET /providers/:p/wagering/transactions/:ext` feitos; ledger paginado e reconciliação = PLANO S9.
+
+## D20. FaultInjector e harness multi-processo (fase 05) [autopilot]
+
+- **Porta** `application/ports/fault-injector.ts`: `checkpoint(point)` com 4 pontos nomeados
+  (`before-commit`, `after-commit-before-ack`, `after-claim-before-publish`,
+  `after-publish-before-mark`). Produção: `NO_FAULTS`. `ProcessKillFaultInjector` só é criado
+  com `NODE_ENV=test` **e** `FAULT_POINT=<nome>`; em qualquer outro `NODE_ENV` o `FAULT_POINT`
+  é ignorado. Nome desconhecido → `InvalidConfigError` na subida (typo em teste não pode virar
+  no-op silencioso). No ponto armado: `process.kill(process.pid, "SIGKILL")` — sem `finally`,
+  sem shutdown hook (provado em `test/unit/fault-injector.test.ts` com subprocesso real; no
+  Windows o Bun traduz para `TerminateProcess`, exit 1 sem sinal).
+- **Onde estão os pontos hoje**: `before-commit` no fim de `ProcessWagerTransaction.attempt`
+  (dentro do `uow.run`, depois de transação/ledger/outbox; replays não passam por ele);
+  `after-commit-before-ack` no controller HTTP entre o retorno do use case (já commitado) e a
+  resposta — para o HTTP a resposta É o ack. O consumer SQS (fase 06) chama o mesmo ponto antes
+  do `DeleteMessage`; o publisher (fase 07) chama os outros dois.
+- **Contrato que o publisher (fase 07) tem de honrar** (os testes de §13.6 dependem dele): corpo
+  da mensagem em `wallet-events.fifo` = `outbox_messages.payload` (envelope com `eventId`);
+  `locked_by` = `INSTANCE_ID` do processo (o harness injeta; fallback aleatório) e **permanece**
+  após publicar — é a auditoria de quem publicou e a prova de que os dois publishers trabalharam.
+- **Harness** `test/support/cluster.ts`: N processos `bun run src/main.ts` (porta livre cada,
+  mesmo banco, mesmas filas criadas uma vez), `/health/ready` antes de liberar; `kill` (SIGKILL),
+  `stop` (SIGTERM), `restart`/`restartAll` (processo NOVO, outra porta, outro pid),
+  `waitForExit` com prazo (para pontos de falha), `sendWagerMessage` (§10), `queueDepth`.
+  Pool por instância 25 (3 × 25 + pool do teste < `max_connections` 100; 25 > 50/3 para a BET 50×).
+- **`eventually`**: estados EVENTUAIS (worker, publisher, redelivery) são reconsultados até um
+  prazo que só transforma "nunca acontece" em falha legível com o último valor — não é sleep
+  para passar: o teste exige o estado.
+- **Testes §13 concorrência** (`test/concurrency/`): 1–3 `http-races`, 4 `multi-instance`, 5
+  `crash-after-commit` (HTTP before-commit e after-commit-before-ack verdes; SQS vermelho até
+  a fase 06), 6 `outbox-publishers` (vermelho até 07), 7 `out-of-order-reference` (vermelho até
+  07), 8 `restart-consistency`. A disputa é provada no banco (`contend`/`countLockWaiters`).

@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, Inject, Param, Post, Res } from "@nestjs/common";
+import { FaultPoint } from "../../../application/ports/fault-injector";
 import type { WagerCommand, WagerResult } from "../../../application/process-wager-transaction";
 import type { WagerTransaction } from "../../../domain/wager-transaction";
 import { HttpProblem, type HttpResponse } from "../http-problem";
@@ -12,7 +13,7 @@ import {
   wagerHttpStatus,
   wagerResponse,
 } from "./dto";
-import { ID_GENERATOR, PROCESS_WAGER_TRANSACTION, WAGERING_QUERIES } from "./tokens";
+import { FAULT_INJECTOR, ID_GENERATOR, PROCESS_WAGER_TRANSACTION, WAGERING_QUERIES } from "./tokens";
 import { notFoundUnlessUuid } from "./wallets.controller";
 
 interface ProcessWagerPort {
@@ -25,6 +26,9 @@ interface TransactionQueriesPort {
 interface IdPort {
   next(): string;
 }
+interface FaultPort {
+  checkpoint(point: FaultPoint): void;
+}
 
 @Controller()
 export class WageringController {
@@ -32,6 +36,7 @@ export class WageringController {
     @Inject(PROCESS_WAGER_TRANSACTION) private readonly processWager: ProcessWagerPort,
     @Inject(WAGERING_QUERIES) private readonly queries: TransactionQueriesPort,
     @Inject(ID_GENERATOR) private readonly ids: IdPort,
+    @Inject(FAULT_INJECTOR) private readonly faults: FaultPort,
   ) {}
 
   /**
@@ -48,6 +53,8 @@ export class WageringController {
     const key = parseIdempotencyKey(idempotencyKey);
     const command = parseWagerCommand(body, key, correlationIdFrom(correlation, () => this.ids.next()));
     const result = await this.processWager.execute(command);
+    // para o HTTP, a resposta é o "ack": morrer aqui = cliente sem resposta, efeito confirmado
+    this.faults.checkpoint(FaultPoint.AfterCommitBeforeAck);
     res.status(wagerHttpStatus(result.status));
     return wagerResponse(result);
   }
