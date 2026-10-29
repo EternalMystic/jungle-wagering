@@ -94,10 +94,12 @@ function agentCommand(agent: AgentName, prompt: string): string[] {
   }
   return ["codex", "exec",
     ...(yolo ? ["--dangerously-bypass-approvals-and-sandbox"]
-             : ["--full-auto", "-c", "sandbox_workspace_write.network_access=true"]),
+             : ["-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]),
     prompt];
 }
 
+// mensagem explícita de limite do próprio agente (vale mesmo com código 0 e arquivos alterados)
+const LIMIT_STRONG = /hit your [\w-]*\s*limit|usage limit reached|limit reached\|\d{10}|quota exceeded|rate limit reached|you've reached your .*limit/i;
 const LIMIT_RE = /usage limit|rate[ _-]?limit|quota|limit reached|too many requests|\b429\b|overloaded|credits? (exhausted|depleted)|out of (credits|usage)|try again (at|in|later)|resets? (at|in)\b/i;
 
 /** Tenta extrair da mensagem o instante de reset da cota. */
@@ -169,11 +171,15 @@ async function runAgent(agent: AgentName, prompt: string, logFile: string) {
   writeFileSync(logFile, all);
   const changed = (await sh("git status --porcelain && git rev-parse HEAD")).out !== before;
   const quickFail = code !== 0 && !changed && Date.now() - started < 3 * 60_000;
-  const limited = (LIMIT_RE.test(tail(all, 40)) && (code !== 0 || !changed)) || quickFail;
-  return { code, timedOut, limited, output: all };
+  const end = tail(all, 40);
+  const limited = LIMIT_STRONG.test(tail(all, 12)) || (LIMIT_RE.test(end) && (code !== 0 || !changed));
+  // saiu com erro na hora, sem mexer em nada e sem falar de cota = agente quebrado (flag, login, modelo…)
+  const broken = !limited && quickFail;
+  return { code, timedOut, limited, broken, output: all };
 }
 
 const ENABLED = (process.env.AUTOPILOT_AGENTS ?? "claude,codex").split(",").map((x) => x.trim()) as AgentName[];
+const brokenStrikes: Partial<Record<AgentName, number>> = {};
 function available(a: AgentName) { return ENABLED.includes(a) && (state.cooldownUntil[a] ?? 0) <= Date.now(); }
 
 async function waitForAgent(preferred: AgentName): Promise<AgentName> {
@@ -282,9 +288,25 @@ for (const phase of PHASES) {
       state.cooldownUntil[agent] = until; save();
       attempt--; // falta de cota não conta como tentativa
       const when = new Date(until).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
-      log(`⛽ ${agent} sem cota (ou falha imediata) até ~${when}; o outro agente assume a fase ${phase.id}`);
+      log(`⛽ ${agent} sem cota até ~${when}; o outro agente assume a fase ${phase.id}`);
+      brokenStrikes[agent] = 0;
       continue;
     }
+    if (r.broken) {
+      attempt--;
+      const n = (brokenStrikes[agent] = (brokenStrikes[agent] ?? 0) + 1);
+      log(`🔧 ${agent} falhou na hora (não é cota): ${tail(r.output, 4).replace(/\s+/g, " ").slice(0, 300)}`);
+      if (n >= 3) {
+        ENABLED.splice(ENABLED.indexOf(agent), 1);
+        log(`🔧 ${agent} DESLIGADO nesta execução após 3 falhas imediatas; veja ${logFile}`);
+        await notify(`🔧 Autopilot: ${agent} desligado (erro de configuração). Seguindo com ${ENABLED.join("+") || "ninguém"}.`);
+        if (ENABLED.length === 0) { log("🚧 nenhum agente funcional; parando"); process.exit(1); }
+      } else {
+        state.cooldownUntil[agent] = Date.now() + 10 * 60_000; save();
+      }
+      continue;
+    }
+    brokenStrikes[agent] = 0;
     if (r.timedOut) log(`⏱  ${agent} excedeu o tempo; avaliando o que ficou pronto`);
 
     if (!phase.mayEditFrozen) {

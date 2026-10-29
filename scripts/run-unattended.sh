@@ -37,6 +37,7 @@ if [[ "${1:-}" == "--status" ]]; then
   exit 0
 fi
 
+[[ -f "$PIDFILE" ]] && ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null && rm -f "$PIDFILE"   # sobra de execução morta
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "O autopilot já está rodando (PID $(cat "$PIDFILE")). Use --status ou --stop."
   exit 1
@@ -105,6 +106,15 @@ elif command -v systemd-inhibit >/dev/null 2>&1; then
   else
     echo "  ⚠️  systemd-inhibit sem permissão; desative a suspensão automática manualmente."
   fi
+elif command -v powershell.exe >/dev/null 2>&1; then
+  # Windows: pede ao sistema para não suspender enquanto este processo viver
+  powershell.exe -NoProfile -WindowStyle Hidden -Command '
+    $sig = "[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint f);"
+    $k = Add-Type -MemberDefinition $sig -Name Pwr -Namespace W -PassThru
+    while ($true) { [void]$k::SetThreadExecutionState([uint32]"0x80000001"); Start-Sleep 50 }
+  ' >/dev/null 2>&1 &
+  echo $! > autopilot/keepawake.pid
+  echo "  ✔ Windows: suspensão bloqueada enquanto o autopilot roda (mantenha na tomada)"
 else
   echo "  ⚠️  não achei como impedir a suspensão. Desative a suspensão automática do sistema manualmente."
 fi
@@ -148,6 +158,7 @@ if [[ "$FOREGROUND" == "1" ]]; then
 
 MSG
   ${KEEP[@]+"${KEEP[@]}"} bash autopilot/watchdog.sh 2>&1 | tee -a autopilot/run.out
+  [[ -f autopilot/keepawake.pid ]] && kill "$(cat autopilot/keepawake.pid)" 2>/dev/null; rm -f autopilot/keepawake.pid
   exit 0
 fi
 
