@@ -20,7 +20,6 @@ import { resolveEagerly } from "./resolve-pending-references";
 import { settleWager } from "./settle-wager";
 export { REFERENCE_FIRST_RETRY_MS } from "./settle-wager";
 
-/** O que o provedor submete — igual por HTTP e por SQS (§10: mesmo use case). */
 export interface WagerCommand {
   readonly idempotencyKey: string;
   readonly providerId: string;
@@ -35,11 +34,7 @@ export interface WagerCommand {
   readonly correlationId: string;
 }
 
-/**
- * Resultado (o mesmo no replay, §7.7). `balance` é o saldo observado sob o lock no momento
- * da decisão, congelado em `result_balance_amount`. Sem `transactionId` só em WALLET_NOT_FOUND,
- * a única rejeição não persistida (D6).
- */
+// Replay usa o saldo salvo na decisao. WALLET_NOT_FOUND fica sem transactionId.
 export interface WagerResult {
   readonly transactionId: string | undefined;
   readonly status: WagerTransactionStatus;
@@ -48,31 +43,16 @@ export interface WagerResult {
   readonly idempotentReplay: boolean;
 }
 
-/**
- * De onde veio o comando quando a entrada é a fila (§10). Com ela, o use case grava a inbox
- * `(consumerName, messageId)` na MESMA transação do efeito; sem ela (HTTP), não há inbox.
- */
+// No SQS, inbox e efeito ficam no mesmo commit. HTTP nao usa inbox.
 export interface QueueDelivery {
   readonly consumerName: string;
   readonly messageId: string;
 }
 
-/** Nova leitura após perder a corrida de um 23505 (D4): 1 basta; 3 é folga, não laço. */
+// Apos 23505, tenta reler quem ganhou a corrida de idempotencia.
 const MAX_ATTEMPTS = 3;
 
-/**
- * Caminho crítico (CLAUDE.md, "Contrato transacional"): uma transação SQL curta por tentativa —
- *   1. `SELECT … FOR UPDATE` na wallet (lock POR WALLET; wallets diferentes seguem em paralelo);
- *   2. inbox (só SQS): `INSERT … ON CONFLICT DO NOTHING`; já existia → replay (mesmo hash) ou
- *      veneno (`InboxPayloadMismatchError`); a linha é marcada processada no mesmo commit;
- *   3. busca por `idempotency_key`: mesmo hash → replay do resultado ORIGINAL; outro → conflito;
- *      mesmo (provider, external) com outra key → conflito;
- *   4. decisão no domínio; INSERT da transação; UPDATE condicionado da wallet; INSERT do ledger;
- *   5. INSERT na outbox (eventos do mesmo commit);
- *   6. COMMIT — só então a resposta sai.
- * 23505 numa chave de idempotência (corrida com uma transação de OUTRA wallet) ⇒ ROLLBACK e
- * releitura, que vira replay ou conflito.
- */
+// Wallet primeiro; inbox, efeito e outbox ficam no mesmo commit.
 export class ProcessWagerTransaction {
   constructor(
     private readonly uow: UnitOfWork,
@@ -125,8 +105,8 @@ export class ProcessWagerTransaction {
 
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.uow.run((repositories) =>
-          this.attempt(repositories, command, hash, build, delivery && this.receiveInbox(delivery, hash)),
+        return await this.uow.run((repos) =>
+          this.attempt(repos, command, hash, build, delivery && this.receiveInbox(delivery, hash)),
         );
       } catch (error) {
         if (error instanceof IdempotencyRaceLostError && attempt < MAX_ATTEMPTS) continue;
@@ -136,63 +116,55 @@ export class ProcessWagerTransaction {
   }
 
   private async attempt(
-    repositories: TransactionalRepositories,
+    repos: TransactionalRepositories,
     command: WagerCommand,
     hash: string,
     build: (at: Date) => WagerTransaction,
     inbox: InboxMessage | undefined,
   ): Promise<WagerResult> {
-    const { wallets, transactions } = repositories;
+    const { wallets, transactions } = repos;
 
-    // 1. lock POR WALLET — antes de qualquer leitura/escrita de inbox ou transação
-    //    (ordem wallet → demais linhas)
+    // Wallet antes da inbox e das transacoes.
     const wallet = await wallets.lockById(command.walletId);
 
-    // 2. inbox: redelivery de mensagem já confirmada não decide nada de novo
     if (inbox !== undefined) {
-      const previous = await repositories.inbox.insertIfAbsent(inbox);
+      const previous = await repos.inbox.insertIfAbsent(inbox);
       if (previous !== undefined) {
         if (!previous.matchesPayload(hash)) {
           throw new InboxPayloadMismatchError(
             `message ${inbox.consumerName}/${inbox.messageId} was already received with a different payload`,
           );
         }
-        return this.redelivered(repositories, command, hash);
+        return this.redelivered(repos, command, hash);
       }
     }
 
-    const { result, wrote } = await this.decide(repositories, command, hash, build, wallet);
+    const { result, wrote } = await this.decide(repos, command, hash, build, wallet);
     if (inbox !== undefined) {
       inbox.markProcessed(this.clock.now());
-      await repositories.inbox.markProcessed(inbox);
+      await repos.inbox.markProcessed(inbox);
     }
     if (wrote) this.faults.checkpoint(FaultPoint.BeforeCommit);
     return result;
   }
 
-  /**
-   * A inbox diz que esta mensagem já foi confirmada (inbox e efeito saem no mesmo commit):
-   * devolve o resultado ORIGINAL sem decidir de novo. O original é achado pela identidade de
-   * negócio `(provider, external)` com o mesmo hash (a key não entra no hash, D4). Sem ele, o
-   * original foi a única rejeição não persistida (WALLET_NOT_FOUND, D6) — e continua sendo, mesmo
-   * que a wallet tenha sido criada depois: mensagem tratada não é reprocessada.
-   */
-  private async redelivered(repositories: TransactionalRepositories, command: WagerCommand, hash: string): Promise<WagerResult> {
-    const original = await repositories.transactions.findByProviderExternalId(command.providerId, command.externalTransactionId);
+    // Busca por provider + external id: a key nao entra no hash.
+  // Sem original, foi WALLET_NOT_FOUND. Nao reprocessar se a wallet apareceu depois.
+  private async redelivered(repos: TransactionalRepositories, command: WagerCommand, hash: string): Promise<WagerResult> {
+    const original = await repos.transactions.findByProviderExternalId(command.providerId, command.externalTransactionId);
     if (original?.matchesPayload(hash)) return resultOf(original, true);
     return { ...walletNotFound(), idempotentReplay: true };
   }
 
   private async decide(
-    repositories: TransactionalRepositories,
+    repos: TransactionalRepositories,
     command: WagerCommand,
     hash: string,
     build: (at: Date) => WagerTransaction,
     wallet: Wallet | undefined,
   ): Promise<{ result: WagerResult; wrote: boolean }> {
-    const { transactions } = repositories;
+    const { transactions } = repos;
 
-    // 3. idempotência persistente
     const existing = await transactions.findByIdempotencyKey(command.idempotencyKey);
     if (existing !== undefined) {
       if (!existing.matchesPayload(hash)) {
@@ -200,6 +172,7 @@ export class ProcessWagerTransaction {
       }
       return { result: resultOf(existing, true), wrote: false };
     }
+
     const sameOperation = await transactions.findByProviderExternalId(command.providerId, command.externalTransactionId);
     if (sameOperation !== undefined) {
       throw new IdempotencyConflictError(
@@ -209,20 +182,19 @@ export class ProcessWagerTransaction {
 
     if (wallet === undefined) return { result: walletNotFound(), wrote: false };
 
-    // 4. decisão de negócio sob o lock
     const at = this.clock.now();
     const tx = build(at);
     const reference =
       tx.referenceExternalTransactionId === undefined
         ? undefined
         : await transactions.findByProviderExternalId(tx.providerId, tx.referenceExternalTransactionId);
-    const referenceAlreadyReversed =
+    const wasReversed =
       reference !== undefined && tx.requiresReference() ? await transactions.hasProcessedReversal(reference.id) : false;
-    const decision = decideWager({ wallet, transaction: tx, reference, referenceAlreadyReversed });
+    const decision = decideWager({ wallet, transaction: tx, reference, referenceAlreadyReversed: wasReversed });
 
-    await settleWager(repositories, wallet, tx, decision, at, this.ids);
+    await settleWager(repos, wallet, tx, decision, at, this.ids);
     const result = resultOf(tx, false);
-    if (tx.isTerminal()) await resolveEagerly(repositories, wallet, tx, at, this.ids);
+    if (tx.isTerminal()) await resolveEagerly(repos, wallet, tx, at, this.ids);
     return { result, wrote: true };
   }
 

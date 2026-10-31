@@ -7,7 +7,6 @@
  *   o reenvio (outra instância) é replay com o resultado ORIGINAL — sem segundo débito.
  * - SQS after-commit-before-ack: o consumer confirma, morre antes do `DeleteMessage`; a
  *   mensagem volta após o visibility timeout e a instância reiniciada não duplica (inbox).
- *   Depende do consumer SQS (fase 06): até lá fica VERMELHO, por falta do consumer.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";

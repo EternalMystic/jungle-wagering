@@ -22,7 +22,11 @@ export class SqlBackgroundStore {
               AND (locked_until IS NULL OR locked_until <= clock_timestamp())
             ORDER BY occurred_at, id LIMIT ? FOR UPDATE SKIP LOCKED)
           RETURNING *`, [owner, limit]);
-      return rows.map((r) => ({ message: outboxFromRecord(r), owner, until: toDate(r.locked_until) }));
+      // RETURNING não garante ordem; publicar na ordem de ocorrência mantém a sequência por wallet
+      // dentro do lote (o MessageGroupId preserva a ordem de envio de cada grupo).
+      return rows
+        .map((r) => ({ message: outboxFromRecord(r), owner, until: toDate(r.locked_until) }))
+        .sort((a, b) => a.message.occurredAt.getTime() - b.message.occurredAt.getTime() || a.message.id.localeCompare(b.message.id));
     });
   }
 

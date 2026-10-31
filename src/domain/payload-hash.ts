@@ -3,11 +3,7 @@ import { InvariantViolationError } from "./errors";
 import type { Money } from "./money";
 import type { WagerTransactionKind } from "./wager-transaction";
 
-/**
- * Campos de negócio que entram no hash (D4). Fora: header, idempotencyKey, messageId,
- * occurredAt e qualquer metadado de transporte — assim a mesma operação vinda por HTTP
- * e depois por SQS é replay, não conflito.
- */
+// Transporte fica fora do hash para HTTP e SQS reconhecerem a mesma operacao.
 export interface WagerPayload {
   readonly providerId: string;
   readonly externalTransactionId: string;
@@ -22,12 +18,7 @@ export interface WagerPayload {
 
 export type CanonicalValue = string | boolean | null | undefined | readonly CanonicalValue[] | { readonly [key: string]: CanonicalValue };
 
-/**
- * JSON canônico: chaves ordenadas recursivamente (ordem de code unit UTF-16, a de
- * `Array.prototype.sort`), sem espaços, propriedades `undefined` omitidas, strings com o
- * escape padrão de JSON. Números são RECUSADOS: nenhum campo de negócio é numérico e
- * dinheiro é string — aceitar number reabriria a porta para float e para `1` ≠ `1.0`.
- */
+// Nao aceitar number aqui: dinheiro chega como string.
 export function canonicalJson(value: CanonicalValue): string {
   if (value === null) return "null";
   if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
@@ -35,17 +26,18 @@ export function canonicalJson(value: CanonicalValue): string {
     return `[${value.map((item) => (item === undefined ? "null" : canonicalJson(item))).join(",")}]`;
   }
   if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    const record = value as { readonly [key: string]: CanonicalValue };
-    const members = Object.keys(record)
-      .filter((key) => record[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
-    return `{${members.join(",")}}`;
+    const obj = value as { readonly [key: string]: CanonicalValue };
+    // Nao trocar por localeCompare: muda o hash dependendo do ambiente.
+    const keys = Object.keys(obj).filter((key) => obj[key] !== undefined).sort();
+    const parts: string[] = [];
+    for (const key of keys) {
+      parts.push(`${JSON.stringify(key)}:${canonicalJson(obj[key])}`);
+    }
+    return `{${parts.join(",")}}`;
   }
   throw new InvariantViolationError(`canonicalJson: unsupported value of type ${typeof value}`);
 }
 
-/** Objeto canônico do payload (D4); `referenceExternalTransactionId`/rodada/jogo omitidos quando ausentes. */
 export function canonicalWagerPayload(payload: WagerPayload): string {
   return canonicalJson({
     providerId: payload.providerId,
@@ -60,7 +52,6 @@ export function canonicalWagerPayload(payload: WagerPayload): string {
   });
 }
 
-/** SHA-256 hex (64 chars minúsculos) do JSON canônico em UTF-8. */
 export function payloadHash(payload: WagerPayload): string {
   return sha256Hex(canonicalWagerPayload(payload));
 }

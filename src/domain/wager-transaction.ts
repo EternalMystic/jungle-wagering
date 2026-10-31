@@ -9,10 +9,6 @@ import {
 import { LedgerDirection } from "./ledger-entry";
 import type { Money } from "./money";
 
-/**
- * Objetos `const` + união de literais (não `enum` do TS, que é nominal): o valor do
- * contrato/banco ("BET", "PROCESSED") é o próprio tipo, sem cast nas fronteiras de I/O.
- */
 export const WagerTransactionKind = {
   /** interno: crédito de abertura da wallet; nunca vem da API nem da fila */
   Opening: "OPENING",
@@ -285,8 +281,6 @@ export class WagerTransaction {
     return this._resolvedAt;
   }
 
-  // ---- transições
-
   /**
    * Aplicada. `resultBalance` é o saldo da wallet depois do efeito (ou o atual, para LOSS).
    * REFUND/ROLLBACK exigem a referência interna resolvida.
@@ -357,8 +351,6 @@ export class WagerTransaction {
     this._nextReferenceAttemptAt = undefined;
     this._resolvedAt = at;
   }
-
-  // ---- consultas
 
   isTerminal(): boolean {
     return TERMINAL.includes(this._status);

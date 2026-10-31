@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import { randomUUID } from "node:crypto";
 import type { INestApplication } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "../../app.module";
@@ -8,16 +9,15 @@ import type { Request, Response, NextFunction } from "express";
 import { JsonLogger } from "../../infrastructure/logging/json-logger";
 import { withLogContext } from "../../infrastructure/logging/log-context";
 import { correlationIdFrom } from "./wagering/dto";
-import { randomUUID } from "node:crypto";
 import { NestJsonLogger } from "../../infrastructure/logging/nest-logger";
 
 export interface CreateAppOptions {
   readonly logger?: boolean;
 }
 
-export async function createApp(config: AppConfig, options: CreateAppOptions = {}): Promise<INestApplication> {
-  const app = await NestFactory.create(AppModule.forRoot(config), {
-    logger: options.logger === false ? false : new NestJsonLogger(),
+export async function createApp(cfg: AppConfig, opts: CreateAppOptions = {}): Promise<INestApplication> {
+  const app = await NestFactory.create(AppModule.forRoot(cfg), {
+    logger: opts.logger === false ? false : new NestJsonLogger(),
     abortOnError: false,
   });
   const logger = new JsonLogger("http");

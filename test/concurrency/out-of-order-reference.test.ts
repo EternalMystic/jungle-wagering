@@ -1,8 +1,8 @@
 /**
  * §13 Concorrência 7 — REFUND/ROLLBACK entregue ANTES da referência (§7.1, D8), em 3
  * processos. A reversão nasce PENDING_REFERENCE (202) e precisa terminar PROCESSED quando
- * a BET chega — por resolução ansiosa no commit da BET ou pelo worker agendado (fase 07).
- * Até lá estes testes ficam VERMELHOS no `eventually` (a pendência nunca é resolvida).
+ * a BET chega — por resolução ansiosa no commit da BET ou pelo worker agendado. Se nenhum
+ * dos dois resolver, o `eventually` falha com o último estado lido.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Cluster, eventually } from "../support/cluster";

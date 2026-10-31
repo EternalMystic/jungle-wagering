@@ -15,6 +15,19 @@ test("diagnóstico de erro permite códigos estáveis, sem message, stack, cause
   }
 });
 
+test("falhas de rede e do SDK são identificadas pelo código ou pela classe, nunca pela mensagem", () => {
+  const refused = Object.assign(new Error(`connect ${sensitive}`), { code: "ECONNREFUSED" });
+  expect(errorText(refused)).toBe("NETWORK_ERROR:ECONNREFUSED");
+  class QueueDoesNotExist extends Error { override name = "QueueDoesNotExist"; }
+  expect(errorText(new QueueDoesNotExist(sensitive))).toBe("UNEXPECTED_ERROR:QueueDoesNotExist");
+  const timeout = new Error(sensitive);
+  timeout.name = "TimeoutError";
+  expect(errorText(timeout)).toBe("UNEXPECTED_ERROR:TimeoutError");
+  const forged = new Error("x");
+  forged.name = `Amount ${sensitive}`;
+  expect(errorText(forged)).toBe("UNEXPECTED_ERROR");
+});
+
 test("filtro HTTP registra erro inesperado como JSON sem o payload financeiro e mantém resposta 500", () => {
   const lines: string[] = [];
   let status: number | undefined;

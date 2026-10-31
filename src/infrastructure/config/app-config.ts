@@ -1,10 +1,6 @@
 import { type FaultPoint, isFaultPoint } from "../../application/ports/fault-injector";
 import { randomUUID } from "node:crypto";
 
-/**
- * Configuração do processo, lida do ambiente uma única vez na borda.
- * Defaults apontam para o docker-compose.yml local (Postgres na 55432, emulador SQS na 4566).
- */
 export interface QueueNames {
   readonly wagerTransactions: string;
   readonly wagerTransactionsDlq: string;
@@ -25,38 +21,24 @@ export interface AppConfig {
   readonly queues: QueueNames;
   readonly httpPort: number;
   readonly readinessTimeoutMs: number;
-  /** Conexões do pool do processo (D16: ≥ requisições simultâneas que devem esperar NO banco). */
   readonly dbPoolMax: number;
-  /** `lock_timeout` de cada transação (D3); > 3 s exigido pelos testes de disputa (D16). */
   readonly lockTimeoutMs: number;
-  /** Prazo para abrir uma conexão nova com o Postgres. */
   readonly dbConnectTimeoutMs: number;
-  /** Prazo para obter conexão do pool (pool cheio ou banco inalcançável → transitório). */
   readonly dbAcquireTimeoutMs: number;
-  /**
-   * Socket do Postgres sem tráfego por mais que isto é destruído (D21): banco congelado não
-   * pode segurar uma transação aberta para sempre. Tem de ser > `lockTimeoutMs`.
-   */
+  // Banco pausado não fecha socket. Sem esse prazo a transação fica presa.
   readonly dbSocketTimeoutMs: number;
   readonly consumer: ConsumerConfig;
   readonly nodeEnv: string | undefined;
-  /** `FAULT_POINT` (D20): só tem efeito com `NODE_ENV=test`; nome desconhecido é erro de config. */
   readonly faultPoint: FaultPoint | undefined;
 }
 
-/** Consumer da fila de entrada (D9). */
 export interface ConsumerConfig {
   readonly enabled: boolean;
-  /** Long polling do ReceiveMessage. */
   readonly waitTimeSeconds: number;
-  /** Mensagens por ReceiveMessage (1..10). */
   readonly maxMessages: number;
-  /** Visibilidade renovada (heartbeat) enquanto a mensagem é processada. */
   readonly visibilityTimeoutSeconds: number;
-  /** Backoff de transitórios: `min(base · 2^(n−1), max)` com n = ApproximateReceiveCount. */
   readonly retryBaseSeconds: number;
   readonly retryMaxSeconds: number;
-  /** SIGTERM: prazo para concluir as mensagens em andamento antes de devolvê-las. */
   readonly shutdownGraceMs: number;
 }
 
@@ -78,13 +60,13 @@ function nonEmpty(env: Env, key: string, fallback: string): string {
 
 function url(env: Env, key: string, fallback: string, protocols: readonly string[]): string {
   const value = nonEmpty(env, key, fallback);
-  let parsed: URL;
+  let addr: URL;
   try {
-    parsed = new URL(value);
+    addr = new URL(value);
   } catch {
     throw new InvalidConfigError(`${key} não é uma URL válida`);
   }
-  if (!protocols.includes(parsed.protocol)) {
+  if (!protocols.includes(addr.protocol)) {
     throw new InvalidConfigError(`${key} deve usar ${protocols.join(" ou ")}`);
   }
   return value;

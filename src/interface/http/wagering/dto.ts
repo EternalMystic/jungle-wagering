@@ -1,3 +1,4 @@
+import { HttpProblem } from "../http-problem";
 import type { OpenWalletCommand, WalletView } from "../../../application/open-wallet";
 import type { WagerCommand, WagerResult } from "../../../application/process-wager-transaction";
 import { InvalidMoneyError } from "../../../domain/errors";
@@ -8,12 +9,7 @@ import {
   WagerTransactionStatus,
 } from "../../../domain/wager-transaction";
 import type { Wallet } from "../../../domain/wallet";
-import { HttpProblem } from "../http-problem";
 
-/**
- * Validação de contrato na borda (D5 → 400). Corpos chegam como `unknown`; nada passa
- * adiante sem tipo e formato conferidos. Dinheiro só entra por `Money.from` (regex D2).
- */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SUBMITTABLE_KINDS: readonly string[] = [
   WagerTransactionKind.Bet,
@@ -87,17 +83,18 @@ export function parseWagerCommand(body: unknown, idempotencyKey: string, correla
   if (typeof kind !== "string" || !SUBMITTABLE_KINDS.includes(kind)) {
     throw invalid(`kind must be one of ${SUBMITTABLE_KINDS.join(", ")}`);
   }
-  const submitted = kind as WagerTransactionKind;
+  const wagerKind = kind as WagerTransactionKind;
   const referenceExternalTransactionId = optionalText(b, "referenceExternalTransactionId", 256);
-  if (REVERSALS.includes(submitted) && referenceExternalTransactionId === undefined) {
-    throw invalid(`${submitted} requires referenceExternalTransactionId`);
+  if (REVERSALS.includes(wagerKind) && referenceExternalTransactionId === undefined) {
+    throw invalid(`${wagerKind} requires referenceExternalTransactionId`);
   }
-  if (submitted === WagerTransactionKind.Bet && referenceExternalTransactionId !== undefined) {
+  if (wagerKind === WagerTransactionKind.Bet && referenceExternalTransactionId !== undefined) {
     throw invalid("BET cannot carry referenceExternalTransactionId");
   }
+
   const amount = money(b, "money");
-  if (submitted === WagerTransactionKind.Loss ? amount.isNegative() : !amount.isPositive()) {
-    throw invalid(`money.amount must be ${submitted === WagerTransactionKind.Loss ? ">= 0.00" : "> 0.00"} for ${submitted}`);
+  if (wagerKind === WagerTransactionKind.Loss ? amount.isNegative() : !amount.isPositive()) {
+    throw invalid(`money.amount must be ${wagerKind === WagerTransactionKind.Loss ? ">= 0.00" : "> 0.00"} for ${wagerKind}`);
   }
   return {
     idempotencyKey,
@@ -107,14 +104,12 @@ export function parseWagerCommand(body: unknown, idempotencyKey: string, correla
     walletId: uuid(b.walletId, "walletId"),
     roundId: text(b, "roundId", 256),
     gameId: text(b, "gameId", 256),
-    kind: submitted,
+    kind: wagerKind,
     money: amount,
     ...(referenceExternalTransactionId === undefined ? {} : { referenceExternalTransactionId }),
     correlationId,
   };
 }
-
-// ---- respostas
 
 export interface WalletResponse {
   readonly id: string;

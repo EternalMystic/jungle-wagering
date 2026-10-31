@@ -80,6 +80,7 @@ describe("400 — payload inválido nunca toca o banco", () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ error: { code: "INVALID_PAYLOAD" } });
     expect(await countTransactions(walletId)).toBe(1);
+    await assertGlobalInvariants(db.pool);
   });
 
   test("REFUND sem referenceExternalTransactionId → 400", async () => {
@@ -88,6 +89,7 @@ describe("400 — payload inválido nunca toca o banco", () => {
     const res = await api.submit(bet(walletId, playerId, "refund-no-ref", "1.00", { kind: "REFUND" }));
     expect(res.status).toBe(400);
     expect(await countTransactions(walletId)).toBe(1);
+    await assertGlobalInvariants(db.pool);
   });
 
   test("JSON mal formado → 400 INVALID_PAYLOAD no formato de erro padrão", async () => {
@@ -106,6 +108,7 @@ describe("400 — payload inválido nunca toca o banco", () => {
     expect(res.status).toBe(400);
     const rows = await db.pool.query("SELECT 1 FROM wallets WHERE player_id = $1", [playerId]);
     expect(rows.rowCount).toBe(0);
+    await assertGlobalInvariants(db.pool);
   });
 });
 
@@ -143,6 +146,7 @@ describe("422 — rejeições de negócio (mesmo corpo do 200)", () => {
     });
     const rows = await db.pool.query("SELECT 1 FROM wager_transactions WHERE idempotency_key = 'provider-a:ghost'");
     expect(rows.rowCount).toBe(0);
+    await assertGlobalInvariants(db.pool);
   });
 
   test("moeda diferente da wallet → 422 CURRENCY_MISMATCH persistida com o saldo da wallet (linha 23)", async () => {

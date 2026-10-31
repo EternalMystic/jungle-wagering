@@ -1,9 +1,6 @@
 import { Migration20261028000000_initial } from "./Migration20261028000000_initial";
 
-/**
- * Lista explícita de migrations, em ordem. Não usamos descoberta por glob de arquivos
- * (frágil sob Bun e em binários); toda migration nova é registrada aqui.
- */
+// Registrar migrations novas aqui. Glob falha sob Bun e em binarios.
 export const migrationsList = [
   { name: "Migration20261028000000_initial", class: Migration20261028000000_initial },
 ];

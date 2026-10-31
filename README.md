@@ -1,13 +1,13 @@
 # Distributed Wagering Processor
 
-Serviço NestJS para processar BET, WIN, LOSS, REFUND e ROLLBACK por HTTP ou SQS.
-O PostgreSQL guarda saldo, transações, ledger, inbox e outbox. Dinheiro entra e sai
-como string decimal; no domínio, os cálculos usam centavos em `bigint`.
+Processador de apostas em NestJS. Recebe BET, WIN, LOSS, REFUND e ROLLBACK
+por HTTP ou SQS. Saldo, ledger e dedupe ficam no PostgreSQL, no mesmo commit.
+Dinheiro vai pela API como string; as contas usam centavos em `bigint`.
 
-A especificação está em [docs/CHALLENGE.md](docs/CHALLENGE.md). O desenho e seus
-limites estão em [ARCHITECTURE.md](ARCHITECTURE.md); o resultado da última execução
-fica em [docs/PROGRESS.md](docs/PROGRESS.md). Há provas pendentes registradas na
-[auditoria](docs/AUDITORIA.md) e na [matriz de invariantes](docs/INVARIANTES.md).
+Para rodar, comece pelo Compose abaixo. Para entender alguma escolha menos
+óbvia, veja [ARCHITECTURE.md](ARCHITECTURE.md) e [DECISOES.md](docs/DECISOES.md).
+O enunciado está em [CHALLENGE.md](docs/CHALLENGE.md), e o mapa de garantias
+e testes, em [INVARIANTES.md](docs/INVARIANTES.md).
 
 ## Pré-requisitos
 
@@ -25,9 +25,9 @@ há um equivalente do laço de concorrência ao final. No Windows, diferenças d
 SIGTERM/SIGKILL e bloqueios de subprocessos podem impedir provas de crash e drain;
 veja os limites em ARCHITECTURE.md.
 
-## Subir localmente
+## Rodando aqui
 
-Na raiz do checkout:
+Na raiz do projeto:
 
 ```bash
 bun install
@@ -150,47 +150,53 @@ Suba o Compose antes das suítes reais. Elas criam bancos e filas isolados, usam
 migrations de produção e iniciam processos Bun quando o cenário exige múltiplas
 instâncias ou crash. Rode os comandos a partir da raiz e aguarde cada um terminar.
 
-| Comando | O que verifica |
-|---|---|
-| `bun run scripts/scan-forbidden.ts` | Regras estáticas nos arquivos versionados de `src` e `test`; não prova concorrência nem comportamento financeiro |
-| `bun run typecheck` | Instala dependências e executa TypeScript strict, sem emitir código |
-| `bun run lint` | Regras Biome nos caminhos de package.json; não altera arquivos |
-| `bun run test:unit` | Money exato, wallet, transições, cinco operações, moeda, hash, replay, erros, logs e drain; também cria subprocesso real para FaultInjector |
-| `bun run verify:schema` | Verificador SQL de referência contra PostgreSQL real: ataques às constraints, triggers e invariantes; complementa a comparação da migration |
-| `bun run test:acceptance` | Caixa-preta congelada: schema e HTTP em processo real; abertura, disputa de saldo, BET 50×, unicidade e replay original, conferindo banco |
-| `bun run test:integration` | Catálogo da migration igual ao gabarito e up/down/up; API, inbox, SQS, retry/DLQ, workers, lease/fencing, atomicidade, health, overflow, logs, paginação e reconciliação reais |
-| `bun run test:concurrency` | Três processos, disputa da mesma wallet e independência entre wallets; reenvios, crashes antes/depois do commit, publishers, referências fora de ordem e restart |
-| `bun run test:all` | Todas as suítes descobertas por `bun test`; não inclui automaticamente lint, typecheck, scanner ou verify:schema |
+No dia a dia:
 
-`bun test test/unit` equivale a `test:unit`. Os testes financeiros usam
-`assertGlobalInvariants(db)` sobre I1–I8 de `reference/sql/invariants.sql`:
-saldo reconstruído, versões, unicidade, referências e eventos confirmados. A
-auditoria registra casos antigos sem essa chamada final e lacunas na prova de
-sobreposição de workers. As sabotagens executadas e pendentes estão na matriz.
+```bash
+bun run typecheck
+bun run lint
+bun test test/unit
+```
 
-O portão da fase de documentação é:
+Com o Compose de pé, rode também `test:acceptance`, `test:integration` e
+`test:concurrency` (todos com `bun run`). Eles pegam schema/HTTP, banco e SQS,
+workers, disputas entre processos e crashes. Não são testes só em memória.
+
+`bun run test:all` roda as suítes, mas não inclui lint, typecheck,
+`bun run scripts/scan-forbidden.ts` nem `bun run verify:schema`. O scanner olha
+arquivos versionados; o verificador de schema precisa do Postgres real.
+
+`bun test test/unit` equivale a `test:unit`. Os testes que mexem em dinheiro
+terminam com `assertGlobalInvariants(db)` sobre I1–I8 de
+`reference/sql/invariants.sql`: saldo igual ao reconstruído pelo ledger, versões,
+unicidade, referências e eventos confirmados. As lacunas conhecidas de prova estão
+em ARCHITECTURE.md.
+
+Para conferir tudo como no CI:
 
 ```bash
 docker compose up -d --wait
+bun run sqs:setup
 bun run scripts/scan-forbidden.ts
 bun run typecheck
+bun run lint
 bun run test:unit
+bun run migration:up && bun run migration:down && bun run migration:up
+bun run verify:schema
 bun run test:acceptance
 bun run test:integration
 for i in 1 2 3; do bun run test:concurrency || exit 1; done
-test -s README.md && test -s ARCHITECTURE.md
 ```
 
-Equivalentes das duas últimas linhas em PowerShell:
+A suíte de concorrência roda três vezes porque uma falha intermitente nela é tratada
+como defeito, não como ruído. Em PowerShell, o laço equivalente é:
 
 ```powershell
 foreach ($round in 1..3) {
   bun run test:concurrency
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-if ((Get-Item README.md).Length -le 0 -or (Get-Item ARCHITECTURE.md).Length -le 0) { exit 1 }
 ```
 
-Uma falha de permissão Docker ou `Bun.spawn` deixa o portão reprovado. O resultado
-atual, com saídas e pendências, fica em docs/PROGRESS.md; não substitua processos
-reais por mocks para contornar o ambiente.
+Sem acesso ao Docker ou sem permissão para `Bun.spawn`, os testes de crash,
+multi-instância e Postgres pausado falham por ambiente.

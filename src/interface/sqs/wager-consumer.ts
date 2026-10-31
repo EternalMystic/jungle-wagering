@@ -40,21 +40,8 @@ const MAX_ATTRIBUTE_TEXT = 1024;
 
 type Outcome = "acked" | "dead-lettered" | "retry" | "released";
 
-/**
- * Consumer da fila de entrada (D9, §10). Por mensagem:
- *   parse → `ProcessWagerTransaction.execute(command, inbox)` (MESMO use case do HTTP; inbox
- *   na mesma transação) → COMMIT → só então `DeleteMessage`.
- * Falha: classificada em `retry-policy.ts` — permanente vai à DLQ com motivo e sai da fila;
- * transitória volta com visibilidade = backoff por `ApproximateReceiveCount`, e a RedrivePolicy
- * (maxReceiveCount 5) é a rede de segurança.
- *
- * Ordem: mensagens do mesmo `MessageGroupId` (= wallet) são processadas em sequência; grupos
- * diferentes, em paralelo. Isso é OTIMIZAÇÃO: a correção vem do lock por wallet + inbox.
- * Heartbeat: enquanto um lote está em andamento a visibilidade é renovada.
- * SIGTERM (`stop`): para de buscar, conclui o que está em andamento até `shutdownGraceMs`,
- * devolve o resto com visibilidade 0. Nenhuma rede (SQS) com transação SQL aberta: o use case
- * já confirmou quando o `DeleteMessage` sai.
- */
+// Apaga so depois do commit. Grupos rodam em paralelo; dentro do grupo, em ordem.
+// Lock + inbox cobrem reentregas. No stop, devolve o que sobrou apos shutdownGraceMs.
 export class WagerQueueConsumer {
   private running = false;
   private loop: Promise<void> | undefined;

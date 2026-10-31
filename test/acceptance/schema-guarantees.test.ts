@@ -7,8 +7,8 @@
  * do banco não mudou e roda `assertGlobalInvariants`.
  *
  * Matriz (docs/INVARIANTES.md): linhas 1, 2, 3, 7, 8, 19, 23, 24, 26.
- * Revisão 02r: recusas de CHECK exigem também ONDE (statement × COMMIT) e QUAL
- * constraint, para que nenhum ataque passe por acidente com outro 23514.
+ * Recusas de CHECK exigem também ONDE (statement × COMMIT) e QUAL constraint, para que
+ * nenhum ataque passe por acidente com outro 23514 (D17).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";

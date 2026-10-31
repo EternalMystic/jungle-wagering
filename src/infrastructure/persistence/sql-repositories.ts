@@ -14,7 +14,7 @@ import type {
 import type { InboxMessage } from "../../domain/inbox-message";
 import { LedgerDirection, type WalletLedgerEntry } from "../../domain/ledger-entry";
 import type { OutboxMessage } from "../../domain/outbox-message";
-import type { WagerTransaction } from "../../domain/wager-transaction";
+import type { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../../domain/wager-transaction";
 import type { Wallet } from "../../domain/wallet";
 import { isUniqueViolation } from "./pg-errors";
 import {
@@ -29,6 +29,19 @@ import {
   walletFromRecord,
 } from "./records";
 import type { SqlSession } from "./sql-session";
+
+/**
+ * Escritas que viram métrica. Os repositórios só avisam; quem decide publicar (e só depois
+ * do COMMIT) é a `MikroOrmUnitOfWork`, para que um rollback não conte uma transição que não houve.
+ */
+export interface WriteObserver {
+  /** transação gravada num status novo: inserida, ou PENDING_REFERENCE resolvida */
+  statusRecorded(status: WagerTransactionStatus, kind: WagerTransactionKind): void;
+  /** a inbox já tinha a mensagem: redelivery */
+  inboxDuplicate(): void;
+}
+
+const IGNORE_WRITES: WriteObserver = { statusRecorded() {}, inboxDuplicate() {} };
 
 class SqlWalletRepository implements WalletRepository {
   constructor(private readonly sql: SqlSession) {}
@@ -80,7 +93,7 @@ class SqlWalletRepository implements WalletRepository {
 }
 
 class SqlWagerTransactionRepository implements WagerTransactionRepository {
-  constructor(private readonly sql: SqlSession) {}
+  constructor(private readonly sql: SqlSession, private readonly observer: WriteObserver) {}
 
   async lockById(id: string): Promise<WagerTransaction | undefined> {
     return this.one(`${TRANSACTION_SELECT} WHERE t.id = ? FOR UPDATE OF t`, [id]);
@@ -105,6 +118,8 @@ class SqlWagerTransactionRepository implements WagerTransactionRepository {
         tx.referenceAttempts, tx.nextReferenceAttemptAt ?? null, tx.resolvedAt ?? null, tx.id],
     );
     if (rowCount !== 1) throw new Error(`pending transaction ${tx.id}: update matched ${rowCount} rows`);
+    // reagendar uma pendência não muda o status
+    if (tx.isTerminal()) this.observer.statusRecorded(tx.status, tx.kind);
   }
 
   findById(transactionId: string): Promise<WagerTransaction | undefined> {
@@ -173,6 +188,7 @@ class SqlWagerTransactionRepository implements WagerTransactionRepository {
       }
       throw error;
     }
+    this.observer.statusRecorded(tx.status, tx.kind);
   }
 
   private async one(sql: string, bindings: readonly string[]): Promise<WagerTransaction | undefined> {
@@ -227,7 +243,7 @@ class SqlOutboxRepository implements OutboxRepository {
 }
 
 class SqlInboxRepository implements InboxRepository {
-  constructor(private readonly sql: SqlSession) {}
+  constructor(private readonly sql: SqlSession, private readonly observer: WriteObserver) {}
 
   async insertIfAbsent(message: InboxMessage): Promise<InboxMessage | undefined> {
     // ON CONFLICT espera a transação concorrente com a mesma PK: se ela confirmar, é duplicata
@@ -245,6 +261,7 @@ class SqlInboxRepository implements InboxRepository {
     if (rows[0] === undefined) {
       throw new Error(`inbox ${message.consumerName}/${message.messageId}: conflict reported but no committed row`);
     }
+    this.observer.inboxDuplicate();
     return inboxFromRecord(rows[0]);
   }
 
@@ -259,12 +276,12 @@ class SqlInboxRepository implements InboxRepository {
   }
 }
 
-export function sqlRepositories(sql: SqlSession): TransactionalRepositories {
+export function sqlRepositories(sql: SqlSession, observer: WriteObserver = IGNORE_WRITES): TransactionalRepositories {
   return {
     wallets: new SqlWalletRepository(sql),
-    transactions: new SqlWagerTransactionRepository(sql),
+    transactions: new SqlWagerTransactionRepository(sql, observer),
     ledger: new SqlLedgerRepository(sql),
     outbox: new SqlOutboxRepository(sql),
-    inbox: new SqlInboxRepository(sql),
+    inbox: new SqlInboxRepository(sql, observer),
   };
 }

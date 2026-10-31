@@ -3,15 +3,7 @@ import { LedgerDirection } from "../domain/ledger-entry";
 import { type WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../domain/wager-transaction";
 import type { Wallet } from "../domain/wallet";
 
-/**
- * Decisão de negócio de uma transação submetida, tomada SOB o lock da wallet (D3).
- * Pura: não lê nem escreve nada; o use case resolve a referência e aplica o resultado.
- *
- *   APPLY          → PROCESSED com 1 lançamento na direção dada
- *   RECORD         → PROCESSED sem lançamento (LOSS)
- *   REJECT         → REJECTED com failureCode (sem lançamento)
- *   WAIT_REFERENCE → PENDING_REFERENCE (D8)
- */
+// Quem chama busca a referencia e grava o resultado, com a wallet travada.
 export type WagerDecision =
   | { readonly outcome: "APPLY"; readonly direction: LedgerDirection; readonly referenceTransactionId?: string }
   | { readonly outcome: "RECORD"; readonly referenceTransactionId?: string }

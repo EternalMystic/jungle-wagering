@@ -11,13 +11,12 @@ export interface ReadinessReport {
 
 function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
+  const tooSlow = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`timeout após ${ms}ms`)), ms);
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([promise, tooSlow]).finally(() => clearTimeout(timer));
 }
 
-/** Health checks sem autenticação (CHALLENGE §9). */
 @Controller("health")
 export class HealthController {
   constructor(
@@ -25,25 +24,27 @@ export class HealthController {
     @Inject(READINESS_TIMEOUT_MS) private readonly timeoutMs: number,
   ) {}
 
-  /** Processo vivo: não toca em dependências externas. */
   @Get("live")
   @HttpCode(200)
   live(): { status: "ok" } {
     return { status: "ok" };
   }
 
-  /** PostgreSQL (SELECT 1) e SQS (GetQueueUrl) alcançáveis; 503 se qualquer um falhar. */
   @Get("ready")
   @HttpCode(200)
   async ready(): Promise<ReadinessReport> {
     const results = await Promise.allSettled(this.probes.map((p) => withTimeout(p.check(), this.timeoutMs)));
-    const checks: Record<string, ProbeStatus> = {};
-    results.forEach((r, i) => {
-      const probe = this.probes[i];
-      if (probe) checks[probe.name] = r.status === "fulfilled" ? "up" : "down";
-    });
-    const allUp = results.every((r) => r.status === "fulfilled");
-    if (!allUp) {
+    const checks = {} as Record<string, ProbeStatus>;
+    let ok = true;
+
+    // Não sair na primeira falha: quero ver as outras dependências no 503 também.
+    for (let idx = 0; idx < results.length; idx++) {
+      const res = results[idx]!;
+      const probe = this.probes[idx];
+      if (probe) checks[probe.name] = res.status === "fulfilled" ? "up" : "down";
+      if (res.status !== "fulfilled") ok = false;
+    }
+    if (!ok) {
       const report: ReadinessReport = { status: "unavailable", checks };
       throw new ServiceUnavailableException(report);
     }

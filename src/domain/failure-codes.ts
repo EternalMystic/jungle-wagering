@@ -19,7 +19,6 @@ export const BusinessFailureCode = {
   ReferenceAmountMismatch: "REFERENCE_AMOUNT_MISMATCH",
   ReferenceNotProcessed: "REFERENCE_NOT_PROCESSED",
   ReferenceAlreadyReversed: "REFERENCE_ALREADY_REVERSED",
-  OpeningNotAllowed: "OPENING_NOT_ALLOWED",
 } as const;
 export type BusinessFailureCode = (typeof BusinessFailureCode)[keyof typeof BusinessFailureCode];
 

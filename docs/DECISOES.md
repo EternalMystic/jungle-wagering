@@ -1,138 +1,19 @@
-# Decisões técnicas (semente do ARCHITECTURE.md)
+# Decisões técnicas
 
-Cada item: decisão · por quê · alternativa descartada. O README exige que "qualquer
-interpretação adicional" seja documentada — as marcadas com **[interpretação]** são
-pontos em que o enunciado é ambíguo e a banca provavelmente vai perguntar.
-
-## D24. Observabilidade, consultas e reconciliação (fase 09) [autopilot]
-
-- Ledger: ordem crescente por `wallet_version`, cursor exclusivo `base64url` da versão
-  decimal canônica (sem padding); padrão 50, intervalo 1–100. Busca `limit + 1` para
-  só anunciar continuação quando existe outra linha. Cursor inválido/não canônico ou
-  versão fora do intervalo inteiro seguro retorna 400; wallet ausente retorna 404.
-  **[interpretação]** a paginação é estável por chave imutável, sem OFFSET: novos
-  commits podem aparecer nas próximas páginas, sem repetir/pular versões já lidas.
-  Uma abertura zero não tem entrada v1; a primeira movimentação aparece na versão 2.
-- `ReconcileWallet` usa `WalletReads`; a implementação SQL lê saldo, soma assinada,
-  contagem e diferença em **um SELECT**, no mesmo snapshot READ COMMITTED. Não trava
-  wallet nem compara duas leituras de instantes diferentes. Soma/diferença usam
-  NUMERIC exato do PostgreSQL e chegam como strings de escala 2 (`MoneyProps`), sem
-  conversão monetária para number e sem cast limitador NUMERIC(20,2) no agregado.
-  Isso também permite diagnosticar um ledger corrompido cuja soma exceda o teto do
-  saldo. `difference = storedBalance - calculatedBalance`, inclusive negativa.
-  Retorna 200 com `consistent: false`; incrementa métrica e loga erro com identificadores,
-  nunca valores. Não escreve wallet, ledger, transação ou outbox para "consertar".
-- D12: `JsonLogger` agora usa pino, ALS e redact; saneamento recursivo também cobre
-  campos sensíveis aninhados e instâncias de Error. Middleware HTTP gera/normaliza
-  correlationId, devolve `X-Correlation-Id` e preserva o contexto até o filtro/resposta.
-  HTTP, SQS, publisher e resolução têm escopos assíncronos independentes. O logger
-  Nest também emite JSON sanitizado, sem copiar mensagens/stacks arbitrários.
-- `PrometheusMetrics` possui Registry por aplicação, sem labels de IDs/payloads.
-  `wager_transactions_total{status,kind}` conta transições **confirmadas**, incluindo
-  OPENING e resolução de pendências (PENDING_REFERENCE e terminal são transições
-  distintas). A UoW acumula observações por tentativa e só as aplica após o commit;
-  rollback/replay não contam nova decisão. Duplicatas de inbox também só contam após
-  commit. Replays e latência são observados no adaptador compartilhado HTTP/SQS em
-  torno do mesmo ProcessWagerTransaction; latência inclui erro/tentativas SQL.
-- `sqs_retries_total` conta decisões de retry de mensagens; `sqs_dlq_total{reason}`
-  conta envios explícitos bem-sucedidos à DLQ, antes do ack. A redrive automática do
-  SQS continua uma garantia da fila: este contador não pretende observar entregas
-  realizadas internamente pelo serviço. `lock_conflicts_total` conta 55P03/40001/40P01,
-  inclusive causas embrulhadas. Lag é recalculado sobre a outbox confirmada em cada
-  scrape, incluindo lease/backoff. Histograma e contadores são telemetria do processo
-  e podem reiniciar/perder a última observação em crash; nunca substituem o ledger.
-- D11: AuthGuard nos controllers financeiros delega a ProviderIdentityPort. O adapter
-  NoopProviderIdentity retorna ausência de identidade e permite acesso, conforme §2;
-  não simula validação de token. Adapter futuro com IdP externo (Keycloak, client
-  credentials por provedor) devolve providerId verificado, comparado pelo guard ao
-  providerId da rota/corpo. Health, metrics e SQS não passam pelo guard.
-- Testes novos rodam Nest, PostgreSQL e SQS reais no processo de teste, com banco e
-  filas descartáveis; os testes distribuídos existentes continuam exigindo Bun.spawn.
-  Consumers distintos do caso de observabilidade usam filas distintas: abortar um
-  long poll pode deixar ReceiveMessage em voo no servidor. Reutilizar imediatamente
-  a fila permitia que o poll antigo tornasse invisível uma mensagem do novo cenário.
-  Não se ampliou timeout/retry nem se acrescentou sleep para esconder a disputa.
-- Dependências pino/prom-client exigidas por D12 instaladas; cache Bun da sessão em
-  `.scratch/bun-cache` porque o cache global não permite escrita. `.scratch/` ignorado
-  para não versionar cache, logs ou tentativas de worktree.
-
-## D23. Correções da auditoria (fase 08) [autopilot]
-
-- **[interpretação]** Crédito cujo saldo resultante excederia `NUMERIC(20,2)` é
-  rejeição de negócio `BALANCE_LIMIT_EXCEEDED`. A capacidade é verificada em centavos
-  bigint, depois de validar moeda/player/referência e antes de qualquer movimento.
-  Não arredondar, truncar, saturar ou ampliar o schema. O limite exato continua válido.
-  Rejeição congela o saldo observado, grava inbox/outbox no mesmo commit e permite
-  replay original. A mesma decisão atende HTTP, SQS, worker e resolução ansiosa:
-  uma WIN pendente inválida não pode desfazer a BET válida que disponibilizou a referência.
-- Erros nos logs e no atributo `detail` da DLQ carregam apenas código de aplicação/
-  domínio, SQLSTATE de cinco caracteres ou `UNEXPECTED_ERROR`. Mensagem, stack,
-  cause, detail e conversão textual de objetos arbitrários não são seguros: o driver
-  PostgreSQL pode incluir o JSON financeiro na mensagem (comprovado com erro `22P02`).
-  O filtro HTTP usa o logger JSON existente. A consolidação pino/métricas permanece
-  na fase prevista; esta correção somente elimina o vazamento nos caminhos existentes.
-- Correção da promessa de D18: `aggregateId = walletId` conserva o agrupamento FIFO,
-  mas publishers concorrentes **não garantem ordem de commit**: `UPDATE RETURNING`
-  não tem ordem definida e um lease/backoff anterior não bloqueia eventos posteriores.
-  O contrato é at-least-once por `eventId`, como §11. Consumidores de projeção de saldo
-  devem deduplicar por `eventId` e avançar somente para `walletVersion` maior; operações
-  que precisem da sequência completa devem detectar lacunas e reconciliar. Não confiar
-  na ordem de entrega para aplicar débitos/créditos. Não introduzido lock global nem
-  serialização de todas as wallets para cumprir uma promessa adicional à especificação.
-- Hipótese de regex aceitar LF final foi descartada: padrões sem flag `m` rejeitam
-  `"1.00\n"`/`"BRL\n"` no Bun usado, e já existe teste de amount com LF. Sem alteração
-  de regex ou relaxamento de validação. Evidências e limites em `AUDITORIA.md`.
-
-## D22. Publisher e resolução de pendências (fase 07) [autopilot]
-
-- `SqlBackgroundStore`: claim da outbox em transação curta com `SKIP LOCKED`, lote 50,
-  lease de 30 s e `locked_by = INSTANCE_ID` (fallback UUID por processo). Renova cada
-  evento antes do envio; renovação e conclusão condicionadas a id, dono, vencimento
-  original e lease ainda vigente. Datas do token são truncadas a milissegundos no SQL,
-  preservando a comparação exata com `Date` do JS. Um dono atrasado não marca o lease
-  que outro publisher assumiu. Após sucesso os campos de lease permanecem (D20).
-- SQS recebe somente o envelope persistido; grupo = wallet, dedupe = eventId. Toda
-  chamada SQS acontece depois de fechar a transação de claim/renovação. Envio tem prazo
-  de 10 s, menor que o lease; falha persiste backoff do domínio, libera lease e grava
-  `SQS_PUBLISH_FAILED`, sem copiar erro do SDK que possa conter payload financeiro.
-  Evento nunca é descartado. Os dois checkpoints de crash da outbox estão ligados.
-- `GET /metrics` expõe `outbox_lag_seconds` como gauge no formato Prometheus, calculado
-  diretamente sobre a outbox confirmada, inclusive eventos em backoff/lease. Esta fase
-  implementa somente a métrica de lag; a consolidação da observabilidade continua em S9.
-- O schema congelado não tem colunas de lease para pendências: o claim usa
-  `next_reference_attempt_at = agora + 30 s` como reserva recuperável. `SKIP LOCKED`
-  impede esperar por itens já reivindicados. Essa transação NÃO toma lock de wallet.
-  Ela termina antes do processamento, que sempre trava wallet → transação e relê
-  status/token. Claim velho não consome tentativa nem reprocessa resultado terminal.
-- D8: 5 s iniciais; falhas de resolução reagendam 10/20/40/80/160/300/300 s; a oitava
-  tentativa sem referência rejeita com `REFERENCE_NOT_FOUND` e evento. TTL adicional
-  de 915 s desde a criação evita espera ilimitada após crashes de reivindicadores.
-  **[interpretação]** limite/TTL só rejeita quando a referência continua ausente ou
-  não terminal; uma referência válida já disponível é aplicada e validada normalmente.
-- `settleWager` compartilha a aplicação de decisões entre entrada HTTP/SQS e resolução:
-  transição, UPDATE condicionado, ledger e eventos ficam no mesmo commit. Resolução
-  ansiosa percorre dependências da mesma wallet em lotes de leitura de 50, sem limite
-  total artificial, incluindo cascatas de referências rejeitadas. Sob a wallet já
-  travada, espera por locks curtos de claim em vez de pular uma pendência. Nunca toma
-  a wallet após travar transações. A resposta da referência preserva seu próprio saldo
-  original, mesmo que outras operações mudem a wallet no mesmo commit.
-- Os laços de publisher e pendências são independentes; cada processo os inicia no
-  bootstrap e os encerra antes de fechar pool/SQS. Poll de 250 ms é agendamento de
-  produção, não espera acrescentada a testes de concorrência.
-- Verificação desta sessão limitada pelo ambiente: Docker/`Bun.spawn`, criação de
-  worktree e, intermitentemente, o próprio PowerShell negaram acesso. Não contornar esses bloqueios
-  substituindo processos reais ou retirando proteções; `/prove-red` continua pendente.
-
----
+Registro das decisões citadas no código como D1–D24. Cada item traz a decisão, o motivo
+e, quando houve, a alternativa descartada. **[interpretação]** marca pontos em que o
+enunciado é ambíguo e a leitura adotada precisa estar explícita (§7). A visão geral do
+sistema está em [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## D1. ORM: MikroORM (preferencial)
 
-- `em.transactional()` dá a fronteira de Unit of Work explícita; `LockMode.PESSIMISTIC_WRITE`
-  gera `FOR UPDATE`; `em.fork()` por requisição/mensagem isola o Identity Map.
-- Domínio NÃO é entidade do ORM: `EntitySchema` + mappers na infraestrutura; leitura
-  chama `Wallet.rehydrate(state)`. Mantém o domínio sem decorators (exigência §6.1).
-- Trechos críticos (update condicionado, `ON CONFLICT`, `SKIP LOCKED`) em SQL explícito
-  via `em.execute()` **dentro** da mesma transação — legibilidade e controle do plano.
+- `em.fork().transactional()` dá a fronteira transacional explícita, uma por requisição
+  ou mensagem. Dentro dela, os repositórios usam a própria transação do EM.
+- Domínio NÃO é entidade do ORM, e o ORM não mapeia entidades: as escritas do caminho
+  crítico (`FOR UPDATE`, UPDATE condicionado, `ON CONFLICT`, `SKIP LOCKED`, tradução de
+  23505 pelo nome da constraint) não cabem no flush do Unit of Work, então são SQL
+  explícito com parâmetros posicionais (D19). Registros + mappers chamam
+  `X.rehydrate(state)`; o domínio fica sem decorators (§6.0).
 - Migrations: `@mikro-orm/migrations`, cada uma com `up` e `down`, round-trip testado.
 - Descartado: TypeORM (aceito, mas sem UoW explícito); Prisma (fora do escopo).
 
@@ -208,7 +89,7 @@ Todo erro tem `{ error: { code, message, retryable } }`. Replay devolve o MESMO 
 `REFERENCE_NOT_FOUND` (TTL esgotado) · `REFERENCE_KIND_NOT_REVERSIBLE` ·
 `REFERENCE_SCOPE_MISMATCH` (provider/player/wallet/moeda/rodada) ·
 `REFERENCE_AMOUNT_MISMATCH` · `REFERENCE_NOT_PROCESSED` · `REFERENCE_ALREADY_REVERSED` ·
-`OPENING_NOT_ALLOWED`. Infra (`FAILED`): `PERMANENT_INFRA_ERROR`.
+Infra (`FAILED`): `PERMANENT_INFRA_ERROR`.
 
 **[interpretação]** `WALLET_NOT_FOUND` é a única rejeição não persistida (não há agregado
 dono para a FK); responde 422 e, na fila, faz ack. Documentar.
@@ -256,32 +137,23 @@ dono para a FK); responde 422 e, na fila, faz ack. Documentar.
   published_at IS NULL AND next_attempt_at <= now() AND (locked_until IS NULL OR
   locked_until < now()) ORDER BY occurred_at LIMIT 50 FOR UPDATE SKIP LOCKED) RETURNING *`
   — reivindicação curta, sem segurar transação durante a chamada ao SQS (lease).
-- Publica em `wallet-events.fifo` (fila extra, documentar): `MessageGroupId = aggregateId`,
+- Publica em `wallet-events.fifo` (fila não prevista no enunciado, criada pelo `sqs:setup`): `MessageGroupId = aggregateId`,
   `MessageDeduplicationId = eventId`. Depois: `UPDATE … SET published_at WHERE id AND locked_by=$me`.
 - Crash entre publicar e marcar → lease expira → republica → consumidor deduplica por `eventId`
   (at-least-once honesto; dedupe do FIFO é só otimização de 5 min).
 - Falha: `scheduleRetry` (attempts++, backoff), `last_error`.
 - Métrica `outbox_lag_seconds = now() − min(occurred_at) WHERE published_at IS NULL`.
 
-## D25. Escopo da documentação final (fase 10) [autopilot]
-
-- README e ARCHITECTURE descrevem o código atual e as limitações da auditoria,
-  sem tratar propostas anteriores como implementadas: SQL explícito via MikroORM
-  substitui EntitySchema (D19); a saída não tem ordem de commit (D23); IdP é desenho,
-  não autenticação efetiva (D24). Não alterados schema, domínio ou testes nesta fase.
-- **[interpretação]** Apenas validar token não autoriza consultas sem providerId na
-  rota. O desenho futuro exige política de acesso a wallet/transação e escopos,
-  além da comparação de providerId já existente; não se presume propriedade da
-  wallet a partir do token. Essa lacuna fica explícita, sem implementar nova fase.
-- Portões antigos bloqueados e sabotagens pendentes continuam como pendências.
-  Resultados da fase 10 são registrados pela execução efetiva em PROGRESS.md;
-  documentação não converte teste não executado em prova concluída.
-
 ## D11. Autenticação
 
 **Não implementada** (não pontua, §2). `AuthGuard` no-op atrás de um `ProviderIdentityPort`;
 desenho proposto no ARCHITECTURE.md: Keycloak, client credentials por provedor, claim
 `provider_id` comparada ao `providerId` do corpo. Health e fila fora do escopo.
+
+- **[interpretação]** Validar o token não basta para as consultas sem `providerId` na rota
+  (`GET /wallets/:id`, ledger, reconciliação): o desenho exige uma política de acesso a
+  wallet e transação por escopo, além da comparação de `providerId`. Não se presume a
+  propriedade da wallet a partir do token.
 
 ## D12. Observabilidade
 
@@ -292,7 +164,7 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
 `wager_processing_seconds` (histograma), `reconciliation_divergences_total`.
 `/health/live` (processo) e `/health/ready` (`SELECT 1` + `GetQueueUrl`), ambos sem auth.
 
-## D13. Emulador SQS: MiniStack [autopilot]
+## D13. Emulador SQS: MiniStack
 
 - `ministackorg/ministack` (MIT, porta 4566, sem token) no `docker-compose.yml` e no CI.
   A imagem atual do LocalStack exige conta/token; o MiniStack não.
@@ -305,19 +177,26 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   continua: não dependemos de esgotar 5 recebimentos para tirar um veneno do grupo FIFO.
 - Healthcheck: a imagem pode não ter curl; o compose testa a porta com python/curl/wget.
 
-## D14. Infra local e scripts [autopilot]
+## D14. Infra local e scripts
 
 - Postgres do compose publicado na **55432** do host (a 5432 costuma estar ocupada por
-  outro Postgres da máquina — ocorreu no ambiente do autopilot). `DATABASE_URL` sobrescreve.
+  outro Postgres da máquina). `DATABASE_URL` sobrescreve.
 - `verify:schema` roda `scripts/verify-schema.ts`, que só injeta o `DATABASE_URL` do
   projeto e importa `reference/verify-schema.ts` intacto. Motivo: o default do gabarito é
-  `localhost:5432` e apontaria para um Postgres alheio; `reference/` é congelado.
+  `localhost:5432` e apontaria para um Postgres alheio; `reference/` fica intacto como gabarito.
 - Migrations: o CLI do MikroORM não é usado (depende de ts-node/descoberta de config);
   `scripts/migrate.ts` chama o `Migrator` programaticamente, com `migrationsList` explícita
   (`migrations/index.ts`), `transactional` e `allOrNothing`. Round-trip testado em banco
   descartável em `test/integration/stack.test.ts`.
 
-## D16. Contrato dos testes de aceitação [autopilot]
+## D15. Readiness
+
+- `/health/ready` roda os probes em paralelo, cada um com prazo (`READINESS_TIMEOUT_MS`,
+  padrão 2 s); qualquer falha/timeout → 503 `{status:"unavailable", checks:{…:"down"}}`.
+  Postgres: `select 1` num fork do EM; SQS: `GetQueueUrl` da fila de entrada (prova que a
+  topologia existe, não só que a porta está aberta). `/health/live` não toca em dependências.
+
+## D16. Contrato dos testes de aceitação
 
 - Caixa-preta: a aplicação sobe como PROCESSO (`bun run src/main.ts`) e é acessada por
   HTTP; o banco é preparado pelo comando de produção (`scripts/migrate.ts up`) num
@@ -345,7 +224,7 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
 - Eventos na outbox são localizados por `payload -> 'data' ->> 'transactionId'` (mesma
   convenção de `reference/sql/invariants.sql` I6/I7).
 
-## D17. Régua endurecida na revisão 02r [autopilot]
+## D17. Endurecimento dos testes de aceitação
 
 - Ataques de CHECK conferem ONDE a recusa acontece (`at: statement | commit`) e QUAL
   constraint (`pg_get_constraintdef` casando com a regra). Logo, a migration real precisa:
@@ -358,19 +237,10 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
 - Replay tardio (depois de o saldo mudar) devolve o saldo ORIGINAL — testado na aceitação.
 - O template de testes é indexado pelo hash de `migrations/**`, `scripts/migrate.ts`,
   `src/infrastructure/persistence/**` e lockfile; schema decidido fora disso não é visto.
-- Detalhes e achados: `docs/REVISAO-ACEITACAO.md`.
 
-## D15. Readiness [autopilot]
+## D18. Migration inicial e modelagem do domínio
 
-- `/health/ready` roda os probes em paralelo, cada um com prazo (`READINESS_TIMEOUT_MS`,
-  padrão 2 s); qualquer falha/timeout → 503 `{status:"unavailable", checks:{…:"down"}}`.
-  Postgres: `select 1` num fork do EM; SQS: `GetQueueUrl` da fila de entrada (prova que a
-  topologia existe, não só que a porta está aberta). `/health/live` não toca em dependências.
-
-## D18. Migration inicial e modelagem do domínio (fase 03) [autopilot]
-
-- **Migration**: o schema entra na `Migration20261028000000_initial` (era um spike vazio,
-  nunca usado fora de bancos descartáveis), com `up` = `reference/sql/001_schema.sql` e
+- **Migration**: o schema entra na `Migration20261028000000_initial`, com `up` = `reference/sql/001_schema.sql` e
   `down` = `001_schema.down.sql`, um `addSql` por statement; o BEGIN/COMMIT vem do
   Migrator (`transactional`). `disableForeignKeys: false` fixado na config: `true` faria
   `session_replication_role = replica`, que desliga triggers (as garantias do schema).
@@ -397,7 +267,7 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   `REVERSAL_INSUFFICIENT_FUNDS`.
 - **Eventos**: `aggregateId = walletId` para TODOS (inclusive os de transação): todos os
   eventos de uma wallet caem no mesmo `MessageGroupId`; ordem de commit não é garantida
-  entre publishers (correção da auditoria, D23). Campos ausentes
+  entre publishers (D23). Campos ausentes
   em `data` são `null` (schema JSON estável); `data` é congelado. `WalletBalanceChanged.from`
   exige que o lançamento seja o último movimento da wallet.
 - **Outbox backoff**: `min(1 s · 2^(attempts−1), 5 min)`, sem limite de tentativas — evento
@@ -405,15 +275,15 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   infraestrutura (SQL, D10), não domínio.
 - **Kinds/status/direção** são objeto `as const` + união de literais, não `enum` do TS: o
   enum é nominal e recusaria `"BET"`/`"DEBIT"` vindos do banco/JSON sem cast nas
-  fronteiras (o typecheck do portão da fase 03 pegou isso). Uso igual: `WagerTransactionKind.Bet`.
+  fronteiras. Uso igual: `WagerTransactionKind.Bet`.
 - **Hash (D4)**: `canonicalJson` recusa números/bigint/Date/Map (só string, boolean, null,
   arrays e objetos planos); chaves ordenadas pela ordem de code unit UTF-16; `undefined`
   omitido. O DTO deve normalizar `null` → ausente antes de montar o `WagerPayload`.
   Domínio usa `node:crypto` (biblioteca padrão, não framework).
 
-## D19. Use cases + HTTP (fase 04) [autopilot]
+## D19. Use cases + HTTP
 
-- **Persistência em SQL explícito, sem EntitySchema (por ora)**: `MikroOrmUnitOfWork.run` =
+- **Persistência em SQL explícito, sem EntitySchema**: `MikroOrmUnitOfWork.run` =
   `em.fork().transactional(...)`; dentro dela os repositórios usam o `Knex.Transaction` do
   próprio EM (`em.getTransactionContext()`) com placeholders `?` → parâmetros posicionais do
   driver (nada interpolado). Motivo: o caminho crítico inteiro é SQL que o flush do UoW não
@@ -440,19 +310,19 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   referência existir); referência REJECTED/FAILED → `REFERENCE_NOT_PROCESSED`. WIN/LOSS com
   referência ausente também aguardam (mais seguro que creditar um WIN sem BET).
 - **PENDING_REFERENCE**: primeira tentativa em +5 s (D8), evento `WagerTransactionPendingReference`,
-  202. Resolução ansiosa e worker ficam para a fase do worker (PLANO S7), como manda esta fase.
+  202. Resolução ansiosa e worker: D22.
 - **HTTP**: corpo único para 200/202/422 `{transactionId, status, balance, failureCode, idempotentReplay}`
   (`balance` null em PENDING_REFERENCE e WALLET_NOT_FOUND; `failureCode` null fora de rejeição).
-  FAILED (inalcançável por ora) → 422. `kind: OPENING` → 400 `INVALID_PAYLOAD`; BET com referência
+  FAILED (nenhum fluxo atual o produz) → 422. `kind: OPENING` → 400 `INVALID_PAYLOAD`; BET com referência
   → 400; REFUND/ROLLBACK sem referência → 400. `referenceExternalTransactionId: null` = ausente.
   UUIDs normalizados para minúsculas na borda (o escopo compara strings). Id malformado em GET → 404.
   JSON malformado → 400 `INVALID_PAYLOAD`. `X-Correlation-Id` aceito (ASCII visível ≤ 128) ou gerado.
 - **OPENING** emite `WagerTransactionProcessed` + `WalletBalanceChanged` (o saldo mudou); as
   invariantes I6/I7 isentam OPENING, mas consumidores do saldo precisam do primeiro movimento.
 - **Consultas**: `GET /wallets/:id`, `GET /wagering/transactions/:id`,
-  `GET /providers/:p/wagering/transactions/:ext` feitos; ledger paginado e reconciliação = PLANO S9.
+  `GET /providers/:p/wagering/transactions/:ext`; ledger paginado e reconciliação em D24.
 
-## D20. FaultInjector e harness multi-processo (fase 05) [autopilot]
+## D20. FaultInjector e harness multi-processo
 
 - **Porta** `application/ports/fault-injector.ts`: `checkpoint(point)` com 4 pontos nomeados
   (`before-commit`, `after-commit-before-ack`, `after-claim-before-publish`,
@@ -465,9 +335,9 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
 - **Onde estão os pontos hoje**: `before-commit` no fim de `ProcessWagerTransaction.attempt`
   (dentro do `uow.run`, depois de transação/ledger/outbox; replays não passam por ele);
   `after-commit-before-ack` no controller HTTP entre o retorno do use case (já commitado) e a
-  resposta — para o HTTP a resposta É o ack. O consumer SQS (fase 06) chama o mesmo ponto antes
-  do `DeleteMessage`; o publisher (fase 07) chama os outros dois.
-- **Contrato que o publisher (fase 07) tem de honrar** (os testes de §13.6 dependem dele): corpo
+  resposta — para o HTTP a resposta É o ack. O consumer SQS chama o mesmo ponto antes
+  do `DeleteMessage`; o publisher chama os outros dois.
+- **Contrato do publisher** (os testes de §13.6 dependem dele): corpo
   da mensagem em `wallet-events.fifo` = `outbox_messages.payload` (envelope com `eventId`);
   `locked_by` = `INSTANCE_ID` do processo (o harness injeta; fallback aleatório) e **permanece**
   após publicar — é a auditoria de quem publicou e a prova de que os dois publishers trabalharam.
@@ -480,11 +350,11 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   prazo que só transforma "nunca acontece" em falha legível com o último valor — não é sleep
   para passar: o teste exige o estado.
 - **Testes §13 concorrência** (`test/concurrency/`): 1–3 `http-races`, 4 `multi-instance`, 5
-  `crash-after-commit` (HTTP before-commit e after-commit-before-ack verdes; SQS vermelho até
-  a fase 06), 6 `outbox-publishers` (vermelho até 07), 7 `out-of-order-reference` (vermelho até
-  07), 8 `restart-consistency`. A disputa é provada no banco (`contend`/`countLockWaiters`).
+  `crash-after-commit` (HTTP before-commit, HTTP after-commit-before-ack e SQS
+  after-commit-before-ack), 6 `outbox-publishers`, 7 `out-of-order-reference`, 8
+  `restart-consistency`. A disputa é provada no banco (`contend`/`countLockWaiters`).
 
-## D21. Consumer SQS + inbox (fase 06) [autopilot]
+## D21. Consumer SQS + inbox
 
 - **Onde**: `src/interface/sqs/` (adaptador de entrada, como o controller HTTP): `wager-message.ts`
   (envelope §10 → `WagerCommand` com a MESMA validação do DTO HTTP; key = `data.idempotencyKey`),
@@ -535,8 +405,117 @@ redact de `money`/payload. prom-client em `/metrics`: `wager_transactions_total{
   key) e para outra key com mesmo `(provider, external)` (409 → que pela fila seria DLQ
   `IDEMPOTENCY_CONFLICT` em vez de ack). A inbox é o que transforma redelivery em ack silencioso
   e detecta messageId reaproveitado com outro payload.
-- **Revalidação em ambiente restrito (2026-10-29) [autopilot]**: o portão deve continuar
-  vermelho quando Docker nega acesso ao pipe ou `Bun.spawn` retorna EPERM. Não substituir os
-  testes de processo/crash por execução no mesmo processo, não remover o SIGKILL e não
-  transformar falha de infraestrutura do harness em sucesso. Resultados e pendências atuais
-  ficam em `docs/PROGRESS.md`; o relato anterior de verde não valida esta nova execução.
+
+## D22. Publisher e resolução de pendências
+
+- `SqlBackgroundStore`: claim da outbox em transação curta com `SKIP LOCKED`, lote 50,
+  lease de 30 s e `locked_by = INSTANCE_ID` (fallback UUID por processo). Renova cada
+  evento antes do envio; renovação e conclusão condicionadas a id, dono, vencimento
+  original e lease ainda vigente. Datas do token são truncadas a milissegundos no SQL,
+  preservando a comparação exata com `Date` do JS. Um dono atrasado não marca o lease
+  que outro publisher assumiu. Após sucesso os campos de lease permanecem (D20).
+- SQS recebe somente o envelope persistido; grupo = wallet, dedupe = eventId. Toda
+  chamada SQS acontece depois de fechar a transação de claim/renovação. Envio tem prazo
+  de 10 s, menor que o lease; falha persiste backoff do domínio, libera lease e grava
+  `SQS_PUBLISH_FAILED`, sem copiar erro do SDK que possa conter payload financeiro.
+  Evento nunca é descartado. Os dois checkpoints de crash da outbox estão ligados.
+- `GET /metrics` expõe `outbox_lag_seconds` como gauge no formato Prometheus, calculado
+  diretamente sobre a outbox confirmada, inclusive eventos em backoff/lease, a cada scrape.
+- O schema não tem colunas de lease para pendências: o claim usa
+  `next_reference_attempt_at = agora + 30 s` como reserva recuperável. `SKIP LOCKED`
+  impede esperar por itens já reivindicados. Essa transação NÃO toma lock de wallet.
+  Ela termina antes do processamento, que sempre trava wallet → transação e relê
+  status/token. Claim velho não consome tentativa nem reprocessa resultado terminal.
+- D8: 5 s iniciais; falhas de resolução reagendam 10/20/40/80/160/300/300 s; a oitava
+  tentativa sem referência rejeita com `REFERENCE_NOT_FOUND` e evento. TTL adicional
+  de 915 s desde a criação evita espera ilimitada após crashes de reivindicadores.
+  **[interpretação]** limite/TTL só rejeita quando a referência continua ausente ou
+  não terminal; uma referência válida já disponível é aplicada e validada normalmente.
+- `settleWager` compartilha a aplicação de decisões entre entrada HTTP/SQS e resolução:
+  transição, UPDATE condicionado, ledger e eventos ficam no mesmo commit. Resolução
+  ansiosa percorre dependências da mesma wallet em lotes de leitura de 50, sem limite
+  total artificial, incluindo cascatas de referências rejeitadas. Sob a wallet já
+  travada, espera por locks curtos de claim em vez de pular uma pendência. Nunca toma
+  a wallet após travar transações. A resposta da referência preserva seu próprio saldo
+  original, mesmo que outras operações mudem a wallet no mesmo commit.
+- Os laços de publisher e pendências são independentes; cada processo os inicia no
+  bootstrap e os encerra antes de fechar pool/SQS. Poll de 250 ms é agendamento de
+  produção, não espera acrescentada a testes de concorrência.
+
+## D23. Teto de NUMERIC, logs sem payload e ordem dos eventos
+
+- **[interpretação]** Crédito cujo saldo resultante excederia `NUMERIC(20,2)` é
+  rejeição de negócio `BALANCE_LIMIT_EXCEEDED`. A capacidade é verificada em centavos
+  bigint, depois de validar moeda/player/referência e antes de qualquer movimento.
+  Não arredondar, truncar, saturar ou ampliar o schema. O limite exato continua válido.
+  Rejeição congela o saldo observado, grava inbox/outbox no mesmo commit e permite
+  replay original. A mesma decisão atende HTTP, SQS, worker e resolução ansiosa:
+  uma WIN pendente inválida não pode desfazer a BET válida que disponibilizou a referência.
+- Erros nos logs e no atributo `detail` da DLQ carregam apenas código de aplicação/
+  domínio, SQLSTATE de cinco caracteres, código de sistema do Node (`NETWORK_ERROR:ECONNREFUSED`)
+  ou o nome da classe do erro (`UNEXPECTED_ERROR:TimeoutError`). Mensagem, stack,
+  cause, detail e conversão textual de objetos arbitrários não são seguros: o driver
+  PostgreSQL pode incluir o JSON financeiro na mensagem (comprovado com erro `22P02`).
+  O filtro HTTP usa o mesmo logger JSON.
+- Correção da promessa de D18: `aggregateId = walletId` conserva o agrupamento FIFO,
+  mas publishers concorrentes **não garantem ordem de commit**: `UPDATE RETURNING`
+  não tem ordem definida e um lease/backoff anterior não bloqueia eventos posteriores.
+  O lote reivindicado é ordenado por `occurred_at` antes do envio, o que preserva a
+  sequência dentro de um lote; entre publishers continua sem garantia.
+  O contrato é at-least-once por `eventId`, como §11. Consumidores de projeção de saldo
+  devem deduplicar por `eventId` e avançar somente para `walletVersion` maior; operações
+  que precisem da sequência completa devem detectar lacunas e reconciliar. Não confiar
+  na ordem de entrega para aplicar débitos/créditos. Não introduzido lock global nem
+  serialização de todas as wallets para cumprir uma promessa adicional à especificação.
+- Hipótese de regex aceitar LF final foi descartada: padrões sem flag `m` rejeitam
+  `"1.00\n"`/`"BRL\n"` no Bun usado, e já existe teste de amount com LF. Sem alteração
+  de regex ou relaxamento de validação.
+
+## D24. Observabilidade, consultas e reconciliação
+
+- Ledger: ordem crescente por `wallet_version`, cursor exclusivo `base64url` da versão
+  decimal canônica (sem padding); padrão 50, intervalo 1–100. Busca `limit + 1` para
+  só anunciar continuação quando existe outra linha. Cursor inválido/não canônico ou
+  versão fora do intervalo inteiro seguro retorna 400; wallet ausente retorna 404.
+  **[interpretação]** a paginação é estável por chave imutável, sem OFFSET: novos
+  commits podem aparecer nas próximas páginas, sem repetir/pular versões já lidas.
+  Uma abertura zero não tem entrada v1; a primeira movimentação aparece na versão 2.
+- `ReconcileWallet` usa `WalletReads`; a implementação SQL lê saldo, soma assinada,
+  contagem e diferença em **um SELECT**, no mesmo snapshot READ COMMITTED. Não trava
+  wallet nem compara duas leituras de instantes diferentes. Soma/diferença usam
+  NUMERIC exato do PostgreSQL e chegam como strings de escala 2 (`MoneyProps`), sem
+  conversão monetária para number e sem cast limitador NUMERIC(20,2) no agregado.
+  Isso também permite diagnosticar um ledger corrompido cuja soma exceda o teto do
+  saldo. `difference = storedBalance - calculatedBalance`, inclusive negativa.
+  Retorna 200 com `consistent: false`; incrementa métrica e loga erro com identificadores,
+  nunca valores. Não escreve wallet, ledger, transação ou outbox para "consertar".
+- D12: `JsonLogger` usa pino, ALS e redact; saneamento recursivo também cobre
+  campos sensíveis aninhados e instâncias de Error. Middleware HTTP gera/normaliza
+  correlationId, devolve `X-Correlation-Id` e preserva o contexto até o filtro/resposta.
+  HTTP, SQS, publisher e resolução têm escopos assíncronos independentes. O logger
+  Nest também emite JSON sanitizado, sem copiar mensagens/stacks arbitrários.
+- `PrometheusMetrics` possui Registry por aplicação, sem labels de IDs/payloads.
+  `wager_transactions_total{status,kind}` conta transições **confirmadas**, incluindo
+  OPENING e resolução de pendências (PENDING_REFERENCE e terminal são transições
+  distintas). A UoW acumula observações por tentativa e só as aplica após o commit;
+  rollback/replay não contam nova decisão. Duplicatas de inbox também só contam após
+  commit. Replays e latência são observados no adaptador compartilhado HTTP/SQS em
+  torno do mesmo ProcessWagerTransaction; latência inclui erro/tentativas SQL.
+- `sqs_retries_total` conta decisões de retry de mensagens; `sqs_dlq_total{reason}`
+  conta envios explícitos bem-sucedidos à DLQ, antes do ack. A redrive automática do
+  SQS continua uma garantia da fila: este contador não pretende observar entregas
+  realizadas internamente pelo serviço. `lock_conflicts_total` conta 55P03/40001/40P01,
+  inclusive causas embrulhadas. Lag é recalculado sobre a outbox confirmada em cada
+  scrape, incluindo lease/backoff. Histograma e contadores são telemetria do processo
+  e podem reiniciar/perder a última observação em crash; nunca substituem o ledger.
+- D11: AuthGuard nos controllers financeiros delega a ProviderIdentityPort. O adapter
+  NoopProviderIdentity retorna ausência de identidade e permite acesso, conforme §2;
+  não simula validação de token. Adapter futuro com IdP externo (Keycloak, client
+  credentials por provedor) devolve providerId verificado, comparado pelo guard ao
+  providerId da rota/corpo. Health, metrics e SQS não passam pelo guard.
+- Testes novos rodam Nest, PostgreSQL e SQS reais no processo de teste, com banco e
+  filas descartáveis; os testes distribuídos existentes continuam exigindo Bun.spawn.
+  Consumers distintos do caso de observabilidade usam filas distintas: abortar um
+  long poll pode deixar ReceiveMessage em voo no servidor. Reutilizar imediatamente
+  a fila permitia que o poll antigo tornasse invisível uma mensagem do novo cenário.
+  Não se ampliou timeout/retry nem se acrescentou sleep para esconder a disputa.

@@ -1,7 +1,6 @@
 /**
  * §13 Concorrência 6 — publishers concorrentes sobre a MESMA outbox (§11), mais a morte do
- * publisher nos dois pontos críticos (FaultInjector D20). Depende do publisher (fase 07):
- * até lá fica VERMELHO, porque nada publica.
+ * publisher nos dois pontos críticos (FaultInjector D20).
  *
  * Contrato assumido do publisher (D10, D20): corpo da mensagem em `wallet-events.fifo` = o
  * envelope gravado em `outbox_messages.payload` (com `eventId` = id da linha); `locked_by`

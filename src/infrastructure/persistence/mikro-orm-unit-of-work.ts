@@ -20,32 +20,16 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
   ) {}
 
   async run<T>(work: (repositories: TransactionalRepositories) => Promise<T>): Promise<T> {
-    const committed: (() => void)[] = [];
+    // As métricas das escritas só saem se o COMMIT sair; numa nova tentativa a lista recomeça.
+    let afterCommit: (() => void)[] = [];
     const result = await this.withSql((sql) => {
-      const r = sqlRepositories(sql);
-      const insert = r.transactions.insert.bind(r.transactions);
-      const save = r.transactions.savePending.bind(r.transactions);
-      const inbox = r.inbox.insertIfAbsent.bind(r.inbox);
-      r.transactions.insert = async (tx) => {
-        await insert(tx);
-        const { status, kind } = tx;
-        committed.push(() => this.metrics.transaction(status, kind));
-      };
-      r.transactions.savePending = async (tx) => {
-        await save(tx);
-        if (tx.isTerminal()) {
-          const { status, kind } = tx;
-          committed.push(() => this.metrics.transaction(status, kind));
-        }
-      };
-      r.inbox.insertIfAbsent = async (message) => {
-        const previous = await inbox(message);
-        if (previous !== undefined) committed.push(() => this.metrics.inboxDuplicate());
-        return previous;
-      };
-      return work(r);
+      afterCommit = [];
+      return work(sqlRepositories(sql, {
+        statusRecorded: (status, kind) => afterCommit.push(() => this.metrics.transaction(status, kind)),
+        inboxDuplicate: () => afterCommit.push(() => this.metrics.inboxDuplicate()),
+      }));
     });
-    for (const observe of committed) observe();
+    for (const publish of afterCommit) publish();
     return result;
   }
 

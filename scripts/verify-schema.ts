@@ -1,8 +1,5 @@
 #!/usr/bin/env bun
-/**
- * Roda o gabarito reference/verify-schema.ts com o DATABASE_URL do projeto
- * (padrão: Postgres do docker-compose na 55432), sem tocar em reference/.
- */
+// Roda o verificador de reference/ com o DATABASE_URL do projeto.
 import { loadConfig } from "../src/infrastructure/config/app-config";
 
 process.env.DATABASE_URL = loadConfig().databaseUrl;

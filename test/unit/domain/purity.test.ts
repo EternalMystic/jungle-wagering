@@ -9,7 +9,7 @@ const ALLOWED = [/^\.\.?\//, /^node:crypto$/];
 const files = [...new Glob("**/*.ts").scanSync({ cwd: DOMAIN_DIR })];
 
 describe("pureza do domínio (hexagonal: dependências apontam para dentro)", () => {
-  test("o domínio existe e tem os módulos da fase 03", () => {
+  test("o domínio tem os módulos do modelo da §6", () => {
     for (const expected of [
       "money.ts",
       "wallet.ts",

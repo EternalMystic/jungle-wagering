@@ -12,15 +12,18 @@ export class ObservedWagerProcessor {
       providerId: command.providerId, messageId: delivery?.messageId }, async () => {
       const started = performance.now();
       try {
-        const result = await this.processor.execute(command, delivery);
-        enrichLogContext({ transactionId: result.transactionId });
-        if (result.idempotentReplay) this.metrics.replay(delivery === undefined ? "http" : "sqs");
-        this.logger.info("wager transaction completed", { status: result.status, failureCode: result.failureCode, idempotentReplay: result.idempotentReplay });
-        return result;
-      } catch (error) {
-        this.logger.warn("wager transaction failed", { error: errorText(error) });
-        throw error;
-      } finally { this.metrics.processingSeconds((performance.now() - started) / 1000); }
+        const res = await this.processor.execute(command, delivery);
+        enrichLogContext({ transactionId: res.transactionId });
+        if (res.idempotentReplay) this.metrics.replay(delivery === undefined ? "http" : "sqs");
+        this.logger.info("wager transaction completed", { status: res.status, failureCode: res.failureCode, idempotentReplay: res.idempotentReplay });
+        return res;
+      } catch (err) {
+        this.logger.warn("wager transaction failed", { error: errorText(err) });
+        throw err;
+      } finally {
+        const elapsed = performance.now() - started;
+        this.metrics.processingSeconds(elapsed / 1000);
+      }
     });
   }
 }

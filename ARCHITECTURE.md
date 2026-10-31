@@ -1,16 +1,14 @@
-# Arquitetura
+# Como as peças se encaixam
 
-O serviço decide operações de aposta e mantém saldo materializado e ledger no
-mesmo commit. PostgreSQL é a fonte de verdade para dinheiro, idempotência e
-trabalho pendente. SQS transporta comandos e eventos com entrega at-least-once.
+O banco manda no saldo. Uma operação grava saldo, ledger e eventos juntos;
+o SQS só transporta comandos e eventos e pode entregar de novo. Idempotência
+e pendências também ficam no PostgreSQL.
 
-Este documento consolida [DECISOES.md](docs/DECISOES.md), a
-[matriz de invariantes](docs/INVARIANTES.md) e a [auditoria](docs/AUDITORIA.md).
-A especificação é [CHALLENGE.md](docs/CHALLENGE.md). Quando uma escolha posterior
-corrige uma proposta inicial, vale a implementação registrada em D19, D22–D24.
-Em particular, não há EntitySchema em uso nem garantia de ordem de commit na saída.
+As referências D1, D2 etc. apontam para [DECISOES.md](docs/DECISOES.md).
+Para cruzar requisito com teste, use [INVARIANTES.md](docs/INVARIANTES.md).
+O enunciado original está em [CHALLENGE.md](docs/CHALLENGE.md).
 
-## Fronteiras e persistência
+## Pastas e banco
 
 ```mermaid
 flowchart LR
@@ -66,7 +64,7 @@ BRL atende ao escopo do desafio; o modelo carrega moeda e recusa operações ent
 moedas diferentes. Créditos que ultrapassariam o teto são rejeitados com
 `BALANCE_LIMIT_EXCEEDED`, antes de mover saldo. Essa decisão vale também para
 referências pendentes: uma WIN inválida não pode abortar a BET válida que tornou
-sua referência disponível (correção A01/D23).
+sua referência disponível (D23).
 
 O ledger registra uma direção, valor positivo, saldo anterior, saldo posterior e
 versão da wallet. É um ledger de uma wallet, sem contrapartidas de partidas
@@ -206,9 +204,9 @@ transitórias são tentadas novamente.
 Os failureCodes de negócio são INSUFFICIENT_FUNDS, REVERSAL_INSUFFICIENT_FUNDS,
 BALANCE_LIMIT_EXCEEDED, CURRENCY_MISMATCH, WALLET_NOT_FOUND, WALLET_PLAYER_MISMATCH,
 REFERENCE_NOT_FOUND, REFERENCE_KIND_NOT_REVERSIBLE, REFERENCE_SCOPE_MISMATCH,
-REFERENCE_AMOUNT_MISMATCH, REFERENCE_NOT_PROCESSED, REFERENCE_ALREADY_REVERSED e
-OPENING_NOT_ALLOWED. Este último é proteção de domínio; na borda, OPENING inválida
-é recusada antes de criar uma transação. Códigos são contratos, não mensagens livres.
+REFERENCE_AMOUNT_MISMATCH, REFERENCE_NOT_PROCESSED e REFERENCE_ALREADY_REVERSED.
+OPENING submetida por HTTP ou fila não chega a ser transação: é entrada inválida (400
+ou DLQ `INVALID_PAYLOAD`). Códigos são contratos, não mensagens livres.
 
 ## SQS, pendências e recuperação
 
@@ -266,8 +264,9 @@ Crash antes do envio permite retomada após expirar lease; crash após envio e a
 da marcação pode republicar. A entrega continua at-least-once, inclusive fora da
 janela de deduplicação FIFO.
 
-Não há garantia de ordem de commit entre publishers (A03/D23). UPDATE RETURNING
-não ordena o lote, e um evento em backoff não bloqueia os posteriores da wallet.
+Não há garantia de ordem de commit entre publishers (D23). Cada publisher ordena o
+lote reivindicado por occurred_at antes de enviar, mas dois publishers podem pegar
+eventos da mesma wallet, e um evento em backoff não bloqueia os posteriores.
 Consumidores devem deduplicar eventId. Projeções de saldo avançam somente com
 walletVersion maior; quem precisa da sequência completa deve detectar lacunas e
 reconciliar. Não se deve aplicar débitos/créditos novamente com base na chegada
@@ -290,8 +289,11 @@ Não reescreve saldo, ledger ou outbox.
 Pino emite JSON com contexto AsyncLocalStorage de HTTP, SQS e workers. O contexto
 leva correlationId, messageId, transactionId, walletId e providerId quando disponíveis.
 HTTP devolve X-Correlation-Id. Redação recursiva remove campos financeiros e erros
-arbitrários; só códigos seguros de aplicação/domínio/SQLSTATE vão ao diagnóstico.
-Erros do driver podem conter o payload mesmo com SQL parametrizado (A02/D23).
+arbitrários. O diagnóstico de erro leva só identificadores: código de aplicação ou
+domínio, SQLSTATE, código de sistema do Node (ECONNREFUSED) ou nome da classe do erro
+(TimeoutError). Mensagens ficam de fora porque erros do driver podem conter o payload
+mesmo com SQL parametrizado (D23). Falhas dos laços de publisher e de pendências
+também são registradas com esse código.
 
 Prometheus expõe transições confirmadas por status/kind, replays por canal,
 duplicatas de inbox, retries, DLQ explícita por motivo, conflitos de lock, lag da
@@ -299,7 +301,7 @@ outbox, latência e divergências. Decisões/inbox só são contadas após commi
 rollback e replay não contam nova decisão. PENDING_REFERENCE e seu terminal contam
 como duas transições. Lag consulta a outbox confirmada, inclusive leases/backoff.
 Não há labels com IDs. Contadores e histograma são locais ao processo e podem
-perder a última observação em crash; não substituem a auditoria persistida.
+perder a última observação em crash; não substituem os registros persistidos.
 `sqs_dlq_total` não observa redrive interno do broker.
 
 ## Autenticação: extensão existente e desenho proposto
@@ -330,39 +332,40 @@ o enunciado, com validação de domínio do providerId; em operação real, perm
 de fila/IAM e isolamento de rede protegeriam esse canal. Nenhum desses componentes
 de IdP, autorização ou provisionamento está implementado nesta entrega.
 
-## Evidência, limites e próximos passos
+## O que foi testado e o que falta
 
 Os testes reais usam PostgreSQL 16 e MiniStack; processos via Bun.spawn comprovam
 instâncias separadas. As disputas HTTP usam barreira e observação de backends
 esperando lock, além da conferência do banco. Checkpoints before-commit,
 after-commit-before-ack, after-claim-before-publish e after-publish-before-mark
 matam o processo apenas com NODE_ENV=test e FAULT_POINT armado. Crash anterior ao
-commit deve deixar zero efeito; posterior deve permitir replay/retomada.
+commit deve deixar zero efeito; posterior deve permitir replay/retomada. As
+sabotagens já executadas, e o teste que cada uma derrubou, estão na matriz de
+invariantes.
 
-A auditoria de fase 08 fechou os dois achados ALTA de overflow e vazamento em logs.
-Não equivale a aprovação do portão. A fase 09 acrescentou observabilidade e
-consultas; docs/PROGRESS.md contém resultados por execução. As pendências são:
+Limitações conhecidas:
 
-- A04: Object.freeze não torna o estado interno de Date imutável. Datas expostas
-  ainda podem ser alteradas por setTime; não foi observado caminho de produção que
-  faça isso. Copiar instantes nas fronteiras ou usar representação imutável é pendente.
-- T01: cenários distribuídos de referência podem passar pela resolução ansiosa.
-  Falta prova distribuída específica de aplicação financeira pelo worker agendado.
-- T02: donos/PIDs diferentes não provam sobreposição temporal de claims de publishers.
-  Testes de componente cobrem SKIP LOCKED/fencing; retirar apenas SKIP LOCKED ainda
-  pode deixar uma execução serializada passar.
-- T03: pool agregado 75 é menor que as largadas de 252/120 requisições em dois
-  cenários. Há prova de participação dos três processos, mas não uma conexão para
-  cada requisição simultânea como pede a regra literal do projeto.
-- T04–T06: alguns testes antigos não encerram com assertGlobalInvariants; limpeza
-  em falha parcial de bootstrap do cluster pode deixar processo; alguns cálculos
-  esperados nos testes usam inteiros pequenos em number. Produção monetária usa Money.
-- Sabotagens isoladas das garantias novas continuam pendentes onde a matriz assim
-  indica. Vermelho natural antes da implementação não substitui `/prove-red`.
-- No Windows, Bun pode traduzir SIGTERM diretamente para TerminateProcess, sem
-  handler: drain foi testado com falso apenas em unit, não provado por sinal real
-  nesse ambiente. Bloqueios de Docker, Bun.spawn e refs/worktree impediram partes
-  de portões anteriores; a execução atual deve ser avaliada pela sua própria saída.
+- Datas expostas pelo domínio (`createdAt` de lançamentos e eventos) são `Date`;
+  `Object.freeze` não impede `setTime`. Nenhum caminho de produção altera essas
+  datas, mas a imutabilidade não é estrutural nesse ponto.
+- Referências fora de ordem entre instâncias costumam ser resolvidas pela resolução
+  ansiosa no commit da referência. O worker agendado tem testes de integração,
+  inclusive terminalização após o limite, mas não há um teste distribuído em que só
+  ele aplique o crédito de uma referência já disponível.
+- O teste com dois publishers prova que ambos publicaram parte do backlog e que nada
+  se perdeu; não prova que os claims se sobrepuseram no tempo. Remover só o
+  `SKIP LOCKED` serializaria os claims sem quebrar a correção, e esse teste seguiria
+  verde: o pulo de linha bloqueada é provado no teste de componente.
+- Nos cenários multi-instância com mais requisições (252 e 120), o pool somado dos três
+  processos é 75 conexões. O teste prova que os três processos disputaram a mesma
+  wallet ao mesmo tempo, mas nem toda requisição tem conexão própria no instante da largada.
+- Os testes de infraestrutura (health, stack, emulador SQS e migrations) não chamam
+  `assertGlobalInvariants`, porque não tocam dinheiro. Se o bootstrap de um cluster de
+  teste falhar no meio, um processo já iniciado pode escapar da limpeza.
+- No Windows, o Bun converte SIGTERM em TerminateProcess, sem rodar handler. O drain
+  do consumer é provado em teste unitário com SQS falso, não por sinal real nesse sistema.
+- O teste de Postgres pausado depende de `docker compose pause`; sem acesso ao Docker,
+  ele falha por ambiente, não pelo comportamento testado.
 - Não há teste de carga, números de throughput/p95, dashboard ou tracing distribuído.
   A imagem MiniStack usa tag latest; não há garantia de reprodução entre versões
   diferentes dessa imagem. O Compose é ambiente local, sem desenho de HA/backup.
@@ -370,11 +373,11 @@ consultas; docs/PROGRESS.md contém resultados por execução. As pendências s�
   Não há runbook implementado de reenvio controlado de DLQ; reprocessar exige manter
   identidades e compreender decisões terminais, não apenas reenfileirar payloads.
 
-Com mais tempo, primeiro concluiria o portão e as sabotagens em ambiente com
-subprocessos, Docker e worktrees permitidos. Depois fecharia T01–T06 e a exposição
-de Date, sem reduzir as asserções existentes. Mediria contenção de wallets,
-duração de cadeias ansiosas, capacidade dos pools e lag sob carga antes de mudar
-locks ou particionar dados. Em seguida viria autenticação/autorização com IdP,
-alertas de lag/DLQ/reconciliação, runbooks de incidentes e retenção que preserve
-replay e trilha financeira. Partidas dobradas e ordenação persistente por wallet
-seriam mudanças de requisito a avaliar, com migração e novas provas próprias.
+O que falta primeiro: medir sobreposição dos publishers e testar o worker de
+pendências aplicando sozinho uma referência já disponível, entre instâncias.
+Depois, carga de verdade: contenção por wallet, tamanho das cadeias, pool e lag.
+Sem esses números seria chute trocar locks ou particionar.
+
+Autenticação/autorizção, alertas, reenvio de DLQ e retenção também faltam.
+Partidas dobradas e ordem persistente por wallet mudariam o requisito; precisariam
+de migração e testes próprios.

@@ -1,8 +1,8 @@
 import type { ReconciliationResult, WalletReads } from "../../application/ports/wallet-reads";
 import { WalletLedgerEntry, type LedgerDirection } from "../../domain/ledger-entry";
-import { Money } from "../../domain/money";
 import type { MikroOrmUnitOfWork } from "./mikro-orm-unit-of-work";
 import { toDate } from "./records";
+import { Money } from "../../domain/money";
 
 interface LedgerRecord {
   id: string; wallet_id: string; transaction_id: string; currency: string; direction: LedgerDirection;
@@ -26,14 +26,19 @@ export class SqlWalletReads implements WalletReads {
         "SELECT * FROM wallet_ledger_entries WHERE wallet_id = ? AND wallet_version > ? ORDER BY wallet_version ASC LIMIT ?",
         [walletId, afterVersion, limit],
       );
-      return rows.map((r) => WalletLedgerEntry.rehydrate({ id: r.id, walletId: r.wallet_id, transactionId: r.transaction_id,
+      const out = [] as WalletLedgerEntry[];
+      for (const r of rows) {
+        out.push(WalletLedgerEntry.rehydrate({ id: r.id, walletId: r.wallet_id, transactionId: r.transaction_id,
         direction: r.direction, money: Money.from({ amount: r.amount, currency: r.currency }),
         balanceBefore: Money.from({ amount: r.balance_before, currency: r.currency }),
         balanceAfter: Money.from({ amount: r.balance_after, currency: r.currency }),
         walletVersion: integer(r.wallet_version), createdAt: toDate(r.created_at) }));
+      }
+      return out;
     });
   }
 
+  // Deixar num SELECT só, senão dá para comparar saldos de commits diferentes.
   reconciliation(walletId: string): Promise<ReconciliationResult | undefined> {
     return this.uow.withSql(async (sql) => {
       const { rows } = await sql.query<{ id: string; currency: string; stored: string; calculated: string; difference: string; consistent: boolean; checked: string }>(

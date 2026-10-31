@@ -1,12 +1,4 @@
-/**
- * Sobe a aplicação como PROCESSO REAL (`bun run src/main.ts`) apontada para o banco
- * isolado do arquivo e para filas SQS exclusivas do arquivo (nada compartilhado com
- * outros testes nem com o ambiente de desenvolvimento). Espera `/health/ready` = 200.
- *
- * Contrato de ambiente com a aplicação (D16 em docs/DECISOES.md):
- *   DATABASE_URL, PORT, SQS_WAGER_QUEUE, SQS_WAGER_DLQ, SQS_WALLET_EVENTS_QUEUE,
- *   DB_POOL_MAX (pool do processo ≥ paralelismo dos testes).
- */
+// Processo separado, banco e filas exclusivos do teste. Aguarda /health/ready.
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { type QueueNames, loadConfig } from "../../src/infrastructure/config/app-config";

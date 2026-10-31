@@ -6,7 +6,7 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "typecheck": "bun install && tsc --noEmit -p tsconfig.json",
-    "lint": "biome lint src test migrations scripts/sqs-setup.ts scripts/migrate.ts scripts/verify-schema.ts",
+    "lint": "biome lint src test migrations scripts/sqs-setup.ts scripts/migrate.ts scripts/verify-schema.ts scripts/scan-forbidden.ts",
     "sqs:setup": "bun install && bun run scripts/sqs-setup.ts",
     "migration:up": "bun install && bun run scripts/migrate.ts up",
     "migration:down": "bun install && bun run scripts/migrate.ts down",

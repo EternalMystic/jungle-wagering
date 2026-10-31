@@ -12,11 +12,8 @@ const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 /** Capacidade de NUMERIC(20,2), em centavos. */
 const MAX_ABS_CENTS = 10n ** 20n - 1n;
 
-/**
- * Dinheiro exato: bigint em centavos + moeda ISO-4217. Imutável. Nunca arredonda —
- * entrada fora da escala é erro (D2). Negativos só existem como resultado interno
- * (`subtract`/`negate`); contratos de entrada passam por `from`, que os recusa.
- */
+// Centavos em bigint, sem arredondamento. A entrada recusa negativos;
+// subtract/negate podem produzir negativos internamente.
 export class Money {
   private constructor(
     private readonly cents: bigint,

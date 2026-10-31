@@ -1,4 +1,3 @@
-import { DomainError } from "../domain/errors";
 import { WagerTransactionProcessed } from "../domain/events/wager-transaction-events";
 import { WalletBalanceChanged } from "../domain/events/wallet-balance-changed";
 import type { Money } from "../domain/money";
@@ -7,6 +6,7 @@ import { openingPayloadHash } from "../domain/payload-hash";
 import { WagerTransaction } from "../domain/wager-transaction";
 import { Wallet } from "../domain/wallet";
 import { InvalidCommandError } from "./errors";
+import { DomainError } from "../domain/errors";
 import type { Clock } from "./ports/clock";
 import type { IdGenerator } from "./ports/id-generator";
 import type { UnitOfWork } from "./ports/unit-of-work";
@@ -24,12 +24,8 @@ export interface WalletView {
   readonly version: number;
 }
 
-/**
- * Abre a wallet (version 1) e, se o saldo inicial for > 0, a transação interna OPENING
- * PROCESSED + CREDIT v1 + eventos — tudo na MESMA transação SQL (§9). Wallet duplicada
- * para player+moeda sai do banco (`uq_wallet_player_currency`) como `WalletAlreadyExistsError`,
- * inclusive quando duas criações correm juntas.
- */
+// Saldo inicial positivo gera OPENING, ledger e eventos no mesmo commit.
+// A constraint player+moeda resolve criacoes concorrentes.
 export class OpenWallet {
   constructor(
     private readonly uow: UnitOfWork,
@@ -39,7 +35,7 @@ export class OpenWallet {
 
   async execute(command: OpenWalletCommand): Promise<WalletView> {
     const at = this.clock.now();
-    const openingTransactionId = this.ids.next();
+    const openingId = this.ids.next();
     let opened: ReturnType<typeof Wallet.open>;
     try {
       opened = Wallet.open({
@@ -47,7 +43,7 @@ export class OpenWallet {
         playerId: command.playerId,
         initialBalance: command.initialBalance,
         at,
-        openingTransactionId,
+        openingTransactionId: openingId,
         openingEntryId: this.ids.next(),
       });
     } catch (error) {
@@ -55,13 +51,12 @@ export class OpenWallet {
       throw error;
     }
     const { wallet, openingEntry } = opened;
-
-    await this.uow.run(async (repositories) => {
-      await repositories.wallets.insert(wallet);
+    await this.uow.run(async (repos) => {
+      await repos.wallets.insert(wallet);
       if (openingEntry === undefined) return;
 
       const opening = WagerTransaction.createOpening({
-        id: openingTransactionId,
+        id: openingId,
         walletId: wallet.id,
         playerId: wallet.playerId,
         money: wallet.balance,
@@ -70,12 +65,17 @@ export class OpenWallet {
         createdAt: at,
       });
       opening.markProcessed({ resultBalance: wallet.balance, at });
-      await repositories.transactions.insert(opening);
-      await repositories.ledger.append(openingEntry);
+      await repos.transactions.insert(opening);
+      await repos.ledger.append(openingEntry);
 
-      const ctx = () => ({ eventId: this.ids.next(), correlationId: command.correlationId, occurredAt: at });
-      await repositories.outbox.add(OutboxMessage.enqueue(WagerTransactionProcessed.from(opening, ctx())));
-      await repositories.outbox.add(OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, openingEntry, ctx())));
+      // Cada evento precisa do seu id, mesmo saindo do mesmo commit.
+      await repos.outbox.add(OutboxMessage.enqueue(WagerTransactionProcessed.from(opening, {
+        eventId: this.ids.next(), correlationId: command.correlationId, occurredAt: at,
+      })));
+
+      await repos.outbox.add(OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, openingEntry, {
+        eventId: this.ids.next(), correlationId: command.correlationId, occurredAt: at,
+      })));
     });
 
     return { id: wallet.id, playerId: wallet.playerId, balance: wallet.balance, version: wallet.version };

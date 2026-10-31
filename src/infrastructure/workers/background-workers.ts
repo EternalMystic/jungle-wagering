@@ -1,7 +1,7 @@
 import { GetQueueUrlCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import type { FaultInjector } from "../../application/ports/fault-injector";
 import type { ResolvePendingReferences } from "../../application/resolve-pending-references";
-import type { Logger } from "../logging/json-logger";
+import { type Logger, errorText } from "../logging/json-logger";
 import type { SqlBackgroundStore } from "../persistence/sql-background-store";
 import { OutboxPublisher } from "./outbox-publisher";
 import { withLogContext } from "../logging/log-context";
@@ -28,8 +28,6 @@ export class BackgroundWorkers {
     await Promise.all(this.loops);
   }
 
-  get outboxLagSeconds(): number { return this.publisher?.outboxLagSeconds ?? 0; }
-
   private async publish(): Promise<void> {
     if (this.publisher === undefined) {
       const { QueueUrl } = await this.sqs.send(new GetQueueUrlCommand({ QueueName: this.queueName }),
@@ -46,7 +44,7 @@ export class BackgroundWorkers {
       if (!this.running) break;
       await withLogContext({ transactionId: claim.transactionId, walletId: claim.walletId }, async () => {
         try { await this.resolver.execute(claim); }
-        catch { this.logger.warn("pending reference attempt rolled back"); }
+        catch (error) { this.logger.warn("pending reference attempt rolled back", { error: errorText(error) }); }
       });
     }
   }
@@ -62,7 +60,7 @@ export class BackgroundWorkers {
       });
       if (!this.running) break;
       try { await tick(); }
-      catch { this.logger.warn("background worker iteration failed"); }
+      catch (error) { this.logger.warn("background worker iteration failed", { error: errorText(error) }); }
     }
   }
 }

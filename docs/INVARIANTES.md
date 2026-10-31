@@ -1,11 +1,11 @@
 # Matriz de rastreabilidade: exigência → garantia → prova → sabotagem
 
-Regra: uma linha só está "verde" quando as QUATRO colunas existem. A coluna
-"Sabotagem" é o que separa "passou no teste" de "a propriedade existe": remova a
-proteção num worktree descartável (`/prove-red`) e o teste PRECISA ficar vermelho.
-Se não ficar, o teste é decorativo.
+A coluna "Sabotagem" separa "passou no teste" de "a propriedade existe": com a
+proteção removida numa cópia descartável do código, o teste correspondente precisa
+ficar vermelho. Se não ficar, o teste não protege a garantia. As sabotagens já
+executadas estão no fim do documento.
 
-Legenda de teste: `A` = test/acceptance (congelado) · `I` = integration · `C` = concurrency · `U` = unit.
+Legenda de teste: `A` = test/acceptance · `I` = integration · `C` = concurrency · `U` = unit.
 
 | # | Exigência (README) | Garantia (onde mora) | Prova (teste) | Sabotagem que deve deixar vermelho |
 |---|---|---|---|---|
@@ -22,11 +22,11 @@ Legenda de teste: `A` = test/acceptance (congelado) · `I` = integration · `C` 
 | 11 | Ack só após commit (§10) | consumer: commit → `after-commit-before-ack` → delete | C `crash-after-commit` › SQS (verde); I `sqs-consumer` › SIGKILL em after-commit-before-ack; U drain | `DeleteMessage` antes do commit → I vermelho (`queueDepth` 0 ≠ 1), provado na fase 06 |
 | 12 | Redelivery sem duplicar (§10) | inbox PK `(consumer, message_id)` na transação do efeito | I `redelivery 3×`; U inbox (replay original, outra key, payload divergente) | remover inbox (D4 ainda segura o débito; a inbox dá o ack silencioso e detecta messageId com outro payload — D21) |
 | 13 | Erros: negócio/transitório/permanente (§10) | `retry-policy.ts` + visibility backoff + DLQ explícita + redrive | I `permanente → DLQ` (4 motivos, 1º recebimento), `lock preso → 5 recebimentos → DLQ`, `Postgres pausado → retry → recupera`, `negócio → ack`; U classificação | tratar tudo como transitório |
-| 14 | Publishers concorrentes (§11) | `SqlBackgroundStore`: lease + `SKIP LOCKED` + fencing | C `outbox-publishers`; I `background-workers` › disputa de claims e dono antigo; C bloqueado pelo ambiente nesta sessão | remover `SKIP LOCKED` e o lease; prova pendente |
-| 15 | Crash entre commit e publish (§11) | `OutboxPublisher`: checkpoints; lease expira, outro dono publica | C `outbox-publishers` › after-claim-before-publish e after-publish-before-mark (execução bloqueada); I interrupção após envio | marcar published antes de publicar; prova pendente |
+| 14 | Publishers concorrentes (§11) | `SqlBackgroundStore`: lease + `SKIP LOCKED` + fencing | C `outbox-publishers`; I `background-workers` › disputa de claims e dono antigo | remover `SKIP LOCKED` e o lease; prova pendente |
+| 15 | Crash entre commit e publish (§11) | `OutboxPublisher`: checkpoints; lease expira, outro dono publica | C `outbox-publishers` › after-claim-before-publish e after-publish-before-mark; I interrupção após envio | marcar published antes de publicar; prova pendente |
 | 16 | ≥3 instâncias (§8) | tudo acima, sem estado em memória | C `multi-instance` + `http-races` (3 processos `Bun.spawn`, disputa provada no banco) | — (é o teste-mãe) |
-| 17 | Referência fora de ordem (§7.1) | `ResolvePendingReferences` + claim `SKIP LOCKED` + `resolveEagerly` no mesmo commit | C `out-of-order-reference` (execução bloqueada); I `background-workers` › resolução ansiosa, cadeias e reversões | worker sem `SKIP LOCKED` em 2 instâncias; prova pendente |
-| 18 | TTL de referência → REJECTED + evento (§7.1) | 8 tentativas / TTL 915 s; `REFERENCE_NOT_FOUND` + outbox atômica | I `background-workers` › backoff e TTL com clock injetado (verde na execução inicial); caso de 8 tentativas aguarda revalidação | — |
+| 17 | Referência fora de ordem (§7.1) | `ResolvePendingReferences` + claim `SKIP LOCKED` + `resolveEagerly` no mesmo commit | C `out-of-order-reference`; I `background-workers` › resolução ansiosa, cadeias e reversões | worker sem `SKIP LOCKED` em 2 instâncias; prova pendente |
+| 18 | TTL de referência → REJECTED + evento (§7.1) | 8 tentativas / TTL 915 s; `REFERENCE_NOT_FOUND` + outbox atômica | I `background-workers` › backoff e TTL com clock injetado; caso de 8 tentativas aguarda revalidação | — |
 | 19 | Reversão única (§7.4) | `uq_tx_single_reversal` | A `schema: double reversal`; C `same refund 2 ids parallel` | dropar índice |
 | 20 | Reversão com saldo insuficiente → código distinto (§7.9) | domínio | U `rollback of win after spending` | usar `INSUFFICIENT_FUNDS` |
 | 21 | Referência no mesmo escopo (§7.2) | domínio + query por `(provider, external)` | U por campo divergente | — |
@@ -36,15 +36,33 @@ Legenda de teste: `A` = test/acceptance (congelado) · `I` = integration · `C` 
 | 25 | OPENING interno, mesma transação (§9) | use case OpenWallet; trigger de abertura | I `open wallet atomic`; I `OPENING via API → 400` | — |
 | 26 | `version` = 1 e só sobe com saldo (§6.2) | trigger diferido | A; invariante I2 | — |
 | 27 | Reinício preserva consistência (§13.8) | estado só no banco | C `restart-consistency` + invariantes | — |
-| 28 | Reconciliação não corrige em silêncio (§9) | `ReconcileWallet` + `SqlWalletReads`: SELECT único, diferença exata; log pino e contador | I `phase09-http` › divergência deliberada, abertura zero, teto monetário, snapshot durante escrita não confirmada; I1–I8 após restaurar fixture | VERMELHO natural (404) → VERDE; worktree `/prove-red` bloqueado por permissão de ref |
+| 28 | Reconciliação não corrige em silêncio (§9) | `ReconcileWallet` + `SqlWalletReads`: SELECT único, diferença exata; log pino e contador | I `queries-and-observability` › divergência deliberada, abertura zero, teto monetário, snapshot durante escrita não confirmada; I1–I8 após restaurar fixture | VERMELHO natural (404) → VERDE; sabotagem isolada não executada |
 | 29 | Migrations reversíveis (§4) | `up`/`down` | I `migrations round-trip` | — |
-| 30 | Testes sem mock de PG/SQS (§14) | lint + hook | revisão do `test-skeptic` | — |
-| 31 | Crédito não ultrapassa capacidade sem bloquear pendências (§6.1, §7.1; D23) | `Money.canAdd` bigint + `decideWager` → `BALANCE_LIMIT_EXCEEDED`, mesmo commit | I `audit-regressions` › imediato/inbox/replay, ansioso, worker, teto exato | VERMELHO antes da proteção: 3 caminhos lançavam `InvalidMoneyError`; VERDE depois; `/prove-red` isolado pendente |
-| 32 | Logs não carregam payload financeiro (§12; D23) | `errorText` só códigos + filtro HTTP JSON | U `error-logging`; I `audit-regressions` › erro PostgreSQL real com sentinela | VERMELHO antes da proteção: diagnóstico ecoava JSON financeiro (`22P02`); VERDE depois; `/prove-red` isolado pendente |
-| 33 | Ledger paginado estável/opaco (§9) | cursor canônico base64url da wallet_version; comparação exclusiva + ORDER BY + limit+1 | I `phase09-http` › páginas intercaladas com commit, validação, abertura zero, IDs comparados com banco | VERMELHO natural (404) → VERDE; sabotagem isolada pendente |
-| 34 | Observabilidade sem efeitos financeiros (§12; D12) | pino + ALS/redact; Registry por app; métricas de decisões/inbox só após commit; adapter comum HTTP/SQS | U `observability` › redação aninhada e contextos sobrepostos; I `phase09-http` › rollback, pendência, inbox, retry/lock e DLQ reais | Logger vazava sentinela no VERMELHO inicial; `/metrics` sem métricas D12 falhava; VERDE após implementação; sabotagem isolada pendente |
+| 30 | Testes sem mock de PG/SQS (§14) | `scripts/scan-forbidden.ts` no CI recusa `mock.module`/`jest.mock` em integração, concorrência e aceitação | revisão dos arquivos de `test/support` (PostgreSQL e SQS reais) | — |
+| 31 | Crédito não ultrapassa capacidade sem bloquear pendências (§6.1, §7.1; D23) | `Money.canAdd` bigint + `decideWager` → `BALANCE_LIMIT_EXCEEDED`, mesmo commit | I `balance-limit-and-log-safety` › imediato/inbox/replay, ansioso, worker, teto exato | VERMELHO antes da proteção: 3 caminhos lançavam `InvalidMoneyError`; VERDE depois; sabotagem isolada não executada |
+| 32 | Logs não carregam payload financeiro (§12; D23) | `errorText` só códigos + filtro HTTP JSON | U `error-logging`; I `balance-limit-and-log-safety` › erro PostgreSQL real com sentinela | VERMELHO antes da proteção: diagnóstico ecoava JSON financeiro (`22P02`); VERDE depois; sabotagem isolada não executada |
+| 33 | Ledger paginado estável/opaco (§9) | cursor canônico base64url da wallet_version; comparação exclusiva + ORDER BY + limit+1 | I `queries-and-observability` › páginas intercaladas com commit, validação, abertura zero, IDs comparados com banco | VERMELHO natural (404) → VERDE; sabotagem isolada pendente |
+| 34 | Observabilidade sem efeitos financeiros (§12; D12) | pino + ALS/redact; Registry por app; métricas de decisões/inbox só após commit; adapter comum HTTP/SQS | U `observability` › redação aninhada e contextos sobrepostos; I `queries-and-observability` › rollback, pendência, inbox, retry/lock e DLQ reais | Logger vazava sentinela no VERMELHO inicial; `/metrics` sem métricas D12 falhava; VERDE após implementação; sabotagem isolada pendente |
 
 ## Invariante final de todo teste
 
 `reference/sql/invariants.sql` (I1–I8) via `assertGlobalInvariants(db)`. Entre elas:
 `wallet.balance == saldo reconstruído pelo ledger`.
+
+## Sabotagens executadas
+
+Cada linha: a proteção removida numa cópia descartável (git worktree), só em código de
+produção ou migration, e o teste que precisou ficar vermelho. Nenhum teste foi alterado.
+
+| Linha | Sabotagem | Teste | Resultado |
+|---|---|---|---|
+| 2 | `lockById` da wallet sem `FOR UPDATE` | A `§8 cenário obrigatório` | vermelho: o perdedor decide sem lock e o UPDATE condicionado casa 0 linhas (`[200, 500]` em vez de `[200, 422]`); o saldo não fura, mas a garantia de negócio cai |
+| 3 | sem busca por `Idempotency-Key`, sem busca por `(provider, external)` e sem os dois UNIQUE | A `mesma BET 50×` e `10 keys diferentes` | vermelho: 50 respostas originais em vez de 1; dez 200 em vez de um 200 e nove 409 |
+| 7 | migration sem o constraint trigger `ctrg_wallet_ledger_coherence` | A `schema-guarantees` | vermelho: 16 dos 22 casos, entre eles saldo alterado sem lançamento e lançamento órfão |
+| 11 | `DeleteMessage` antes de `execute` no consumer | I `sqs-consumer` › SIGKILL em after-commit-before-ack | vermelho: a mensagem não volta à fila |
+| 12 | `insertIfAbsent` da inbox ignorando conflito | I `sqs-consumer` › redelivery 3× | vermelho: a reentrega é decidida de novo e não é reconhecida como duplicata |
+
+Linha 14 (`SKIP LOCKED` dos publishers): removê-lo serializa os claims sem quebrar a
+correção, e o teste de concorrência continua verde; o comportamento de pular linha
+bloqueada é provado no teste de componente `background-workers`.
+

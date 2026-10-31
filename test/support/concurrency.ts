@@ -1,15 +1,6 @@
-/**
- * Paralelismo REAL e PROVADO.
- *
- * - `StartBarrier`: nenhum participante dispara antes que todos tenham chegado.
- * - `contend`: o teste segura, numa conexão PRÓPRIA, o recurso que as requisições vão
- *   disputar (ex.: a linha da wallet `FOR UPDATE`), dispara as requisições e só solta
- *   quando o Postgres mostrar N backends DA APLICAÇÃO bloqueados em `Lock` ao mesmo
- *   tempo (pg_stat_activity, conexão autocommit separada para não ver snapshot velho).
- *   Isso prova que houve sobreposição de verdade dentro do banco — não basta "passar".
- *   O limite de espera é curto (abaixo do `lock_timeout` de D3) e não é sleep: o
- *   portão abre assim que a disputa é observada.
- */
+// Segura o recurso ate observar os backends esperando lock no banco.
+// Consulta em outra conexao, em autocommit, para evitar snapshot velho.
+// O prazo precisa ficar abaixo do lock_timeout da aplicacao.
 import type { Pool, PoolClient } from "pg";
 
 export class StartBarrier {

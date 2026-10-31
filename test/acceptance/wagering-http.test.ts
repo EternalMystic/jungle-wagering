@@ -8,8 +8,8 @@
  * requisições da aplicação bloqueadas AO MESMO TEMPO — prova de sobreposição real.
  *
  * Cobre: cenário obrigatório da §8; a mesma BET 50× em paralelo (§13 concorrência 1);
- * linhas 1, 2, 3, 24 e 26 da matriz pelo caminho da aplicação. Revisão 02r: replays
- * tardios (depois de o saldo mudar) provam o resultado ORIGINAL (§7.7, linha 6), e o
+ * linhas 1, 2, 3, 24 e 26 da matriz pelo caminho da aplicação. Replays tardios
+ * (depois de o saldo mudar) provam o resultado ORIGINAL (§7.7, linha 6), e o
  * mesmo id do provedor com keys diferentes em paralelo prova a camada 2 de D4.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";

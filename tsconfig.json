@@ -24,6 +24,7 @@
     "migrations/**/*.ts",
     "scripts/sqs-setup.ts",
     "scripts/migrate.ts",
-    "scripts/verify-schema.ts"
+    "scripts/verify-schema.ts",
+    "scripts/scan-forbidden.ts"
   ]
 }

@@ -9,7 +9,6 @@ export interface IntegrationEventProps<T> {
   readonly data: T;
 }
 
-/** Metadados que o use case fornece; `data` e `aggregateId` vêm do domínio. */
 export interface EventContext {
   readonly eventId: string;
   readonly correlationId: string;
@@ -23,16 +22,11 @@ export interface IntegrationEventEnvelope<T> {
   readonly aggregateId: string;
   readonly correlationId: string;
   readonly causationId?: string;
-  /** ISO-8601 */
   readonly occurredAt: string;
   readonly version: number;
   readonly data: T;
 }
 
-/**
- * Envelope de evento. `eventType` e `version` ficam NO TIPO (cada subclasse), nunca numa
- * string solta no call site. `data` é JSON estável: dinheiro como MoneyProps, datas ISO.
- */
 export abstract class IntegrationEvent<T> {
   abstract readonly eventType: string;
   abstract readonly version: number;

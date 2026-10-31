@@ -15,16 +15,17 @@ function pagination(cursor: unknown, limit: unknown): { after: number; limit: nu
   let after = 0;
   if (cursor !== undefined) {
     if (typeof cursor !== "string" || cursor.length > 24 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw invalid();
-    const decoded = Buffer.from(cursor, "base64url").toString("utf8");
-    if (!/^[1-9]\d{0,15}$/.test(decoded) || Buffer.from(decoded).toString("base64url") !== cursor) throw invalid();
-    after = Number(decoded);
+    const rawVersion = Buffer.from(cursor, "base64url").toString("utf8");
+    // Buffer aceita base64 torto; manter a checagem de ida e volta.
+    if (!/^[1-9]\d{0,15}$/.test(rawVersion) || Buffer.from(rawVersion).toString("base64url") !== cursor) throw invalid();
+    after = Number(rawVersion);
     if (!Number.isSafeInteger(after)) throw invalid();
   }
   if (limit === undefined) return { after, limit: 50 };
   if (typeof limit !== "string" || !/^[1-9]\d{0,2}$/.test(limit)) throw invalid();
-  const size = Number(limit);
-  if (size > 100) throw invalid();
-  return { after, limit: size };
+  const n = Number(limit);
+  if (n > 100) throw invalid();
+  return { after, limit: n };
 }
 
 function entryResponse(entry: WalletLedgerEntry) {
@@ -47,8 +48,12 @@ export class WalletQueriesController {
     if (entries === undefined) throw new HttpProblem(404, "NOT_FOUND", "wallet not found");
     const page = entries.slice(0, limit);
     const last = page.at(-1);
-    return { entries: page.map(entryResponse),
-      nextCursor: entries.length > limit && last !== undefined ? Buffer.from(String(last.walletVersion)).toString("base64url") : null };
+    let nextCursor: string | null = null;
+    if (entries.length > limit && last !== undefined) {
+      nextCursor = Buffer.from(String(last.walletVersion)).toString("base64url");
+    }
+
+    return { entries: page.map(entryResponse), nextCursor };
   }
 
   @Post(":walletId/reconciliation")
