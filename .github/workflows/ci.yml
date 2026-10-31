@@ -1,4 +1,6 @@
-# Roda a cada push e PR com PostgreSQL e emulador SQS reais (service containers).
+# Roda a cada push e PR com PostgreSQL e emulador SQS reais, subidos pelo MESMO
+# docker-compose.yml do README: o CI testa o ambiente que um avaliador vai usar, e o
+# teste de Postgres pausado (`docker compose pause`) funciona aqui como na máquina local.
 #
 # Emulador de SQS: MiniStack (sem token) — ver docs/DECISOES.md D13.
 # Se test/integration/sqs-emulator.test.ts ficar vermelho no MiniStack, a troca é por
@@ -20,28 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: wagering
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 2s --health-timeout 5s --health-retries 30
-      # MiniStack (MIT, sem token) — D13. test/integration/sqs-emulator.test.ts prova
-      # FIFO, MessageGroupId, MessageDeduplicationId e RedrivePolicy neste emulador.
-      sqs:
-        image: ministackorg/ministack:1.5.33@sha256:b58186186515a372798ccf0ca9975c295db219b5a811975337d6967b968e07b4
-        ports: ["4566:4566"]
-        options: >-
-          --health-cmd "python3 -c 'import socket;socket.create_connection((\"127.0.0.1\",4566),2)'"
-          --health-interval 3s --health-timeout 5s --health-retries 40 --health-start-period 5s
-
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/wagering
+      DATABASE_URL: postgres://postgres:postgres@localhost:55432/wagering
       AWS_ENDPOINT_URL: http://localhost:4566
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
@@ -52,6 +34,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4   # a mesma versão usada no desenvolvimento
+
+      - name: PostgreSQL e emulador SQS (docker-compose.yml)
+        run: docker compose up -d --wait
 
       - run: bun install --frozen-lockfile
 
@@ -76,3 +63,7 @@ jobs:
 
       - name: Concorrência — 3 execuções seguidas (intermitência é bug)
         run: for i in 1 2 3; do bun run test:concurrency || exit 1; done
+
+      - name: Logs dos containers (só em falha)
+        if: failure()
+        run: docker compose logs --no-color --tail 200
