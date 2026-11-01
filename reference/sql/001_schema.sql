@@ -2,7 +2,7 @@
 -- Jungle Gaming — Distributed Wagering Processor
 -- SCHEMA DE REFERÊNCIA (PostgreSQL 16)
 --
--- Propósito: mostrar ao Claude Code (e à banca) que TODA garantia da seção 6
+-- Propósito: mostrar à equipe de desenvolvimento (e à banca) que TODA garantia da seção 6
 -- do desafio vive no banco, não só no código. A migration real do MikroORM deve
 -- reproduzir isto (up) e desfazer tudo (down). Validado contra Postgres 16 pelo
 -- script reference/verify-schema.ts — cada ataque listado lá precisa FALHAR.
